@@ -3,9 +3,9 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.4.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.5.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 27/27 over TCP, 29/29 over the Steam-style wire)
+## What works (automated two-instance test: 35/35 over TCP, 37/37 over the Steam-style wire)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
@@ -15,17 +15,22 @@ Status: **alpha 0.4.0**. Not affiliated with Denki or Curve Games. Contains no g
 - Joiners teach bots: select a bot, Record, do the work, Play. The host's copy of the joiner records the actions,
   streams them back to the joiner's script editor, and runs the finished script on the real bot. Stop, pause, step
   and whistle calls are forwarded too. The bot being taught is left alone by sync until the editor closes.
+- Bot edit locks: while someone records or edits a bot, everyone else sees "Being programmed by NAME" over it and
+  can't record or play it until they're done (host and joiners, enforced on the host).
+- Joiners rename bots, and move items between their hands, pockets, upgrade slots, bots, wardrobes and aquariums
+  in the inventory screen (drag, click, ctrl-click). Inventory keys (stow, recall, cycle, swap, use) work.
+- A joiner who leaves keeps their character; rejoining with the same name gets it (and its pockets) back.
 - Joiner clicks made while their character is mid-action are held for up to 3 s and retried.
 - Self-healing: every 10 s the host sends a (uid, hash) digest; the joiner re-requests anything that drifted.
 
 ## Not done / known issues
 
-- Bot extras not synced yet: saved/linked scripts library, renaming bots, bot inventory/upgrade screens.
+- Saved/linked script library isn't synced for joiners yet.
 - Building unlocks/research done after joining aren't pushed to joiners yet (their build palette may lag).
 - Joiner inventory, research and wardrobe screens are not synced.
 - Joiner side: bots and animals slide without walk animations (simulation is frozen on the joiner).
 - Steam invites are written but **not yet tested on real Steam** (needs two PCs, two accounts that each own the game).
-- A joiner who disconnects leaves their character standing in the host's world.
+- A joiner who disconnects leaves their character standing until they rejoin.
 - Not tested over the internet or on large late-game bases.
 
 ## Connecting
