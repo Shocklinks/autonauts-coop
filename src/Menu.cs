@@ -1,5 +1,5 @@
 // AutonautsCoop - Menu.cs - F8 window: host / join / status
-// Version 0.1.0 - 2026-10-20 - Created with Claude
+// Version 0.2.0 - 2026-10-20 - Created with Claude
 using System;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -9,7 +9,7 @@ namespace AutonautsCoop
     public class Menu : MonoBehaviour
     {
         bool show;
-        Rect rect = new Rect(40, 40, 340, 230);
+        Rect rect = new Rect(40, 40, 360, 300);
         string ip, port, status = "";
         ConfigEntry<string> cfgIp;
         ConfigEntry<int> cfgPort;
@@ -60,11 +60,18 @@ namespace AutonautsCoop
                 GUI.enabled = inGame;
                 if (GUILayout.Button(inGame ? "Host this world" : "Host (load a world first)"))
                 {
-                    try { Coop.I.StartHost(ParsePort()); cfgPort.Value = ParsePort(); status = "Hosting. Friends join with your IP."; }
+                    try
+                    {
+                        Coop.I.StartHost(ParsePort()); cfgPort.Value = ParsePort();
+                        if (SteamNet.SteamReady) { SteamNet.HostLobby(); status = "Hosting. Invite Steam friends, or share your IP."; }
+                        else status = "Hosting on IP only (Steam not running).";
+                    }
                     catch (Exception e) { status = "Host failed: " + e.Message; Plugin.Log(status); }
                 }
+                GUI.enabled = true;
+                GUILayout.Label("Join: accept a Steam invite, or right-click the host in Steam > Join Game.");
                 GUI.enabled = TestBot.AtMainMenu();
-                GUILayout.Label("Host IP");
+                GUILayout.Label("...or join by IP");
                 ip = GUILayout.TextField(ip, 64);
                 if (GUILayout.Button(TestBot.AtMainMenu() ? "Join" : "Join (from the main menu)"))
                 {
@@ -77,6 +84,7 @@ namespace AutonautsCoop
             {
                 GUILayout.Label("Hosting on port " + Coop.I.Port + ". Players: " + PeerCount());
                 GUILayout.Label("Save as usual; joiners never save.");
+                if (SteamNet.SteamReady && GUILayout.Button("Invite Steam friends")) SteamNet.HostLobby();
             }
             else
             {
@@ -84,6 +92,7 @@ namespace AutonautsCoop
                 GUILayout.Label("To leave: quit to desktop.");
             }
             GUILayout.Label(status);
+            if (SteamNet.Status != "") GUILayout.Label("Steam: " + SteamNet.Status);
             GUILayout.EndVertical();
             GUI.DragWindow();
         }

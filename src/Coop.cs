@@ -1,5 +1,5 @@
 // AutonautsCoop - Coop.cs - session controller, snapshot join
-// Version 0.1.0 - 2026-10-20 - Created with Claude
+// Version 0.2.0 - 2026-10-20 - Created with Claude
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -40,7 +40,7 @@ namespace AutonautsCoop
         public void StartHost(int port)
         {
             Role = Role.Host; Port = port;
-            Host = new NetHost(); Host.Start(port);
+            Host = new NetHost(); Host.StartTcp(port);
             Sync.OnHostStart();
         }
 
@@ -76,6 +76,7 @@ namespace AutonautsCoop
                     case Msg.Hello:
                         var hello = JSON.Parse(Encoding.UTF8.GetString(p.Data));
                         if (hello["protocol"].AsInt != Protocol) { Plugin.Log("peer protocol mismatch"); p.From.Close(); break; }
+                        if (p.From.Name != "?") break;   // duplicate hello (connectionless wire)
                         p.From.Name = hello["name"];
                         SendSnapshot(p.From);
                         break;
@@ -99,16 +100,24 @@ namespace AutonautsCoop
             info["objects"] = ObjectCount();
             peer.Send(Msg.Info, info.ToString());
             Sync.OnPeerJoined(peer);
+            if (TestBot.Active && peer is WirePeer) TestScript.HostSendBlob(peer);
         }
 
         // ---------- client ----------
         public void StartClient(string ip, int port)
         {
+            var c = new NetClient(); c.Connect(ip, port);
+            BeginClient(c);
+        }
+
+        /// Client side of any transport: the connection exists, say hello and wait for the snapshot.
+        public void BeginClient(NetClient c)
+        {
             Role = Role.Client;
-            Client = new NetClient(); Client.Connect(ip, port);
+            Client = c;
             var hello = new JSONObject();
             hello["protocol"] = Protocol;
-            hello["name"] = Environment.UserName.Length > 0 ? "player" : "player";
+            hello["name"] = SteamNet.MyName();
             Client.Host.Send(Msg.Hello, hello.ToString());
         }
 
@@ -133,6 +142,9 @@ namespace AutonautsCoop
                         if (inf["you"] != null && !inf["you"].IsNull) { Sync.MyPlayerUID = inf["you"].AsInt; Plugin.Log("my player uid " + Sync.MyPlayerUID); }
                         else if (inf["tiletest"] != null && !inf["tiletest"].IsNull) TestScript.TileTest = inf["tiletest"];
                         else if (inf["chk"] != null && !inf["chk"].IsNull) TestScript.Chk = inf["chk"];
+                        else if (inf["blob"] != null && !inf["blob"].IsNull) TestScript.Blob = inf;
+                        else if (inf["teach"] != null && !inf["teach"].IsNull) Teach.ClientReceive(inf["teach"].AsArray);
+                        else if (inf["botstate"] != null && !inf["botstate"].IsNull) TestScript.BotState = inf["botstate"];
                         else LastInfo = inf;
                         break;
                     case Msg.Delta:
@@ -153,6 +165,7 @@ namespace AutonautsCoop
         {
             try
             {
+                SteamNet.Pump();
                 if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); }
                 else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); }
                 TestBot.Tick();
@@ -164,6 +177,7 @@ namespace AutonautsCoop
         {
             Host?.Stop();
             Client?.Host?.Close();
+            SteamNet.Shutdown();
         }
     }
 

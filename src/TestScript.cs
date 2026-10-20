@@ -1,6 +1,7 @@
 // AutonautsCoop - TestScript.cs - the QA scenario steps (driven through the real input path)
 // Version 0.1.0 - 2026-10-20 - Created with Claude
 using System.Collections.Generic;
+using HarmonyLib;
 using SimpleJSON;
 using UnityEngine;
 
@@ -19,18 +20,29 @@ namespace AutonautsCoop
             Me().GoToAndAction(t, act, k);
         }
         static bool Carrying(FarmerPlayer p, int uid) { foreach (var h in p.m_FarmerCarry.m_CarryObject) if (h && h.m_UniqueID == uid) return true; return false; }
-        static TileCoord Walkable(TileCoord from, int dx, int dy)
-        {
-            for (int r = 0; r < 6; r++)
-            {
-                var t = new TileCoord(from.x + dx + r, from.y + dy);
-                var tile = TileManager.Instance.GetTile(t);
-                if (tile != null && !global::Tile.GetIsSolid(tile.m_TileType) && PlotManager.Instance.GetPlotAtTile(t).GetObjectTypeAtTile(ObjectType.Rock, t) == null) return t;
-            }
-            return Sync.FreeTileNear(new TileCoord(from.x + dx, from.y + dy));
-        }
+        static TileCoord Walkable(TileCoord from, int dx, int dy) => Sync.FreeTileNear(new TileCoord(from.x + dx, from.y + dy), true);
 
-        static int axeUid = -1, treeUid = -1, logsBefore;
+        static int axeUid = -1, treeUid = -1, logsBefore, bpUid = -1, dragCount, botUid = -1;
+        public static JSONNode BotState; static JSONNode lastGood; static float nextBotQuery;
+        static TileCoord bpTile, movedTile, dragStart;
+        static Building BuildingAt(TileCoord t) { var tile = TileManager.Instance.GetTile(t); return tile != null && tile.m_Building ? tile.m_Building : null; }
+        static Building FloorAt(TileCoord t) { var tile = TileManager.Instance.GetTile(t); return tile != null && tile.m_Floor ? tile.m_Floor : null; }
+        /// A buildable-looking tile near c: in bounds, not solid, no building or floor.
+        static TileCoord EmptyTile(TileCoord c)
+        {
+            for (int r = 0; r < 12; r++)
+                for (int dy = -r; dy <= r; dy++)
+                    for (int dx = -r; dx <= r; dx++)
+                    {
+                        var t = new TileCoord(c.x + dx, c.y + dy);
+                        var tile = TileManager.Instance.GetTile(t);
+                        if (tile == null || global::Tile.GetIsSolid(tile.m_TileType) || tile.m_Building || tile.m_Floor) continue;
+                        bool clear = true;
+                        for (int k = 0; k <= 4 && clear; k++) { var t2 = TileManager.Instance.GetTile(new TileCoord(t.x + k, t.y)); clear = t2 != null && !t2.m_Building && !t2.m_Floor && !global::Tile.GetIsSolid(t2.m_TileType); }
+                        if (clear) return t;
+                    }
+            return c;
+        }
         static BaseClass Nearest(ObjectType t, int maxDist)
         {
             BaseClass best = null; int bd = maxDist + 1; var me = Tile(Me());
@@ -69,7 +81,7 @@ namespace AutonautsCoop
             s.Add(el => { TestBot.StartNewGame(); return true; });
             s.Add(el => Coop.InGame() && GameStateManager.Instance.GetActualState() == GameStateManager.State.Normal && el > 10f);
             s.Add(el => GameStateManager.Instance.GetActualState() == GameStateManager.State.Normal && el > 5f);
-            s.Add(el => { Coop.I.StartHost(TestBot.Port); return true; });
+            s.Add(el => { Coop.I.StartHost(TestBot.Port); if (TestBot.Transport == "udp") SteamNet.UseUdp(TestBot.Port + 100); return true; });
             s.Add(el => { lock (Coop.I.Host.Peers) return Coop.I.Host.Peers.Exists(p => p.Name != "?") && el > 1f; });
             s.Add(el => { TestBot.Assert("host: client joined", true); return true; });
             s.Add(el => HostActRequested);
@@ -105,7 +117,25 @@ namespace AutonautsCoop
 
         // ---------- client ----------
         static TileCoord dest; static int pickUid = -1; static TileCoord hostStart; static int hostUid = -1;
-        public static JSONNode TileTest; public static JSONNode Chk;
+        static int chkTries;
+        public static JSONNode TileTest; public static JSONNode Chk; public static JSONNode Blob;
+        static bool udpStarted; static float lastHello;
+        static void ResendHello()
+        {
+            if (UnityEngine.Time.realtimeSinceStartup - lastHello < 3f) return;
+            lastHello = UnityEngine.Time.realtimeSinceStartup;
+            var hello = new JSONObject(); hello["protocol"] = Coop.Protocol; hello["name"] = "player";
+            Coop.I.Client.Host.Send(Msg.Hello, hello.ToString());
+            Plugin.Log("[test] resent hello");
+        }
+        public static void HostSendBlob(Peer p)
+        {
+            // 400 KB pseudo-random payload: forces multi-piece framing on the wire transport
+            var r = new System.Random(7); var b = new byte[400000]; r.NextBytes(b);
+            var o = new JSONObject(); o["blob"] = System.Convert.ToBase64String(b); o["len"] = b.Length; o["sum"] = Sum(b).ToString();
+            p.Send(Msg.Info, o.ToString());
+        }
+        public static long Sum(byte[] b) { long s = 0; for (int i = 0; i < b.Length; i++) s = s * 31 + b[i]; return s; }
 
         public static void BuildClient(List<TestBot.IEnumeratorStep> s)
         {
@@ -113,6 +143,15 @@ namespace AutonautsCoop
             s.Add(el =>
             {
                 if (el < 2f) return false;
+                if (TestBot.Transport == "udp")
+                {
+                    // The wire is connectionless: (re)send hello until the host answers with the snapshot.
+                    if (!udpStarted) { udpStarted = true; SteamNet.UseUdp(TestBot.Port + 101); SteamNet.ConnectTo((ulong)(TestBot.Port + 100)); return false; }
+                    if (Coop.PendingWorld != null) { TestBot.Assert("client: joined over the Steam-style wire (" + TestBot.Transport + ")", true); return true; }
+                    if (!Coop.I.Client.Host.Alive || (el > 25f && Coop.PendingWorld == null && el % 25f < 0.05f)) { Plugin.Log("[test] host silent, reconnecting"); SteamNet.Peers.Clear(); SteamNet.ConnectTo((ulong)(TestBot.Port + 100)); return false; }
+                    if (el > 4f) { ResendHello(); return false; }
+                    return false;
+                }
                 try { Coop.I.StartClient(TestBot.Ip, TestBot.Port); return true; }
                 catch (System.Exception e) { Plugin.Log("connect retry: " + e.Message); return false; }
             });
@@ -125,6 +164,15 @@ namespace AutonautsCoop
                 TestBot.Assert("client: object count matches host", hostObjs > 0 && System.Math.Abs(hostObjs - mine) <= hostObjs / 100 + 2, "host " + hostObjs + " client " + mine);
                 return true;
             });
+            if (TestBot.Transport == "udp")
+                s.Add(el =>
+                {
+                    if (Blob == null && el < 20f) return false;
+                    bool ok = false;
+                    if (Blob != null) { var b = System.Convert.FromBase64String(Blob["blob"]); ok = b.Length == Blob["len"].AsInt && Sum(b).ToString() == Blob["sum"].Value; }
+                    TestBot.Assert("client: 400 KB message reassembled from pieces", ok);
+                    return true;
+                });
             // 1. my own avatar arrives
             s.Add(el =>
             {
@@ -224,14 +272,160 @@ namespace AutonautsCoop
                 TestBot.Assert("client: chopping a tree replicated (tree gone, logs appeared)", chopped && logs > logsBefore, "logs " + logsBefore + " -> " + logs);
                 return true;
             });
-            // 7. whole-world consistency after things settle
+            // 7. building: joiner uses edit mode to place, move, drag-place and delete (forwarded to the host)
+            s.Add(el => { GameStateManager.Instance.SetState(GameStateManager.State.Edit); return true; });
+            s.Add(el =>
+            {
+                if (GameStateEdit.Instance == null && el < 10f) return false;
+                TestBot.Assert("client: entered edit mode", GameStateEdit.Instance != null);
+                var me = Tile(Me());
+                bpTile = EmptyTile(new TileCoord(me.x - 6, me.y - 6));
+                GameStateEdit.Instance.SetCurrentObjectType(ObjectType.Workbench);
+                Traverse.Create(GameStateEdit.Instance).Method("AddBuilding", new[] { typeof(TileCoord), typeof(ObjectType), typeof(int), typeof(bool), typeof(bool), typeof(Building), typeof(bool) })
+                    .GetValue(bpTile, ObjectType.Workbench, 0, false, false, null, true);
+                Plugin.Log("[test] requested workbench at " + bpTile.x + "," + bpTile.y + " (sent " + Build.Sent + ")");
+                return true;
+            });
+            s.Add(el =>
+            {
+                var b = BuildingAt(bpTile);
+                bool ok = b && (b.m_TypeIdentifier == ObjectType.Workbench || (b.GetComponent<ConverterFoundation>() && b.GetComponent<ConverterFoundation>().m_NewBuilding.m_TypeIdentifier == ObjectType.Workbench));
+                if (!ok && el < 20f) return false;
+                TestBot.Assert("client: placed workbench blueprint appears (via host)", ok, b ? b.m_TypeIdentifier + " uid " + b.m_UniqueID : "none");
+                if (ok) { bpUid = b.m_UniqueID; movedTile = EmptyTile(new TileCoord(bpTile.x - 4, bpTile.y)); BuildingManager.Instance.MoveBuilding(b, movedTile, 1, false); }
+                return true;
+            });
+            s.Add(el =>
+            {
+                var b = Obj(bpUid) ? Obj(bpUid).GetComponent<Building>() : null;
+                bool ok = b && b.m_TileCoord.x == movedTile.x && b.m_TileCoord.y == movedTile.y && b.m_Rotation == 1 && BuildingAt(movedTile) == b && BuildingAt(bpTile) != b;
+                if (!ok && el < 20f) return false;
+                TestBot.Assert("client: moved blueprint (new tile, rotation, tile map updated)", ok, b ? b.m_TileCoord.x + "," + b.m_TileCoord.y + " r" + b.m_Rotation : "missing");
+                // drag-place a sand path line
+                var t = Traverse.Create(GameStateEdit.Instance);
+                GameStateEdit.Instance.SetCurrentObjectType(ObjectType.SandPath);
+                dragStart = EmptyTile(new TileCoord(bpTile.x, bpTile.y + 4));
+                t.Field("m_DragStartPosition").SetValue(dragStart);
+                t.Method("CreateDragModels", new[] { typeof(TileCoord) }).GetValue(new TileCoord(dragStart.x + 4, dragStart.y));
+                dragCount = t.Field("m_DragModels").GetValue<List<Building>>().Count;
+                t.Method("ConvertDragModels").GetValue();
+                t.Method("DestroyDragModels").GetValue();
+                Plugin.Log("[test] drag requested " + dragCount + " tiles");
+                return true;
+            });
+            s.Add(el =>
+            {
+                int n = 0;
+                for (int dx = 0; dx <= 4; dx++) if (FloorAt(new TileCoord(dragStart.x + dx, dragStart.y))) n++;
+                bool ok = dragCount > 0 && n >= dragCount;
+                if (!ok && el < 20f) return false;
+                TestBot.Assert("client: drag-placed path tiles appear", ok, n + "/" + dragCount);
+                // delete the workbench blueprint through edit mode's own delete
+                var b = Obj(bpUid);
+                if (b) Traverse.Create(GameStateEdit.Instance).Method("DestroyBuilding", new[] { typeof(Actionable) }).GetValue(b.GetComponent<Actionable>());
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = !Obj(bpUid) && BuildingAt(movedTile) == null;
+                if (!ok && el < 20f) return false;
+                TestBot.Assert("client: deleted blueprint is gone (object and tile)", ok);
+                GameStateManager.Instance.SetState(GameStateManager.State.Normal);
+                return true;
+            });
+            // 8. bots: joiner teaches a bot to pick up a stick, presses play; the host's bot runs it
+            s.Add(el => { var n = new JSONObject(); n["a"] = "test_givebot"; Coop.I.Client.Host.Send(Msg.Input, n.ToString()); return true; });
+            s.Add(el =>
+            {
+                var bot = Nearest(ObjectType.Worker, 6);
+                if (!bot && el < 15f) return false;
+                TestBot.Assert("client: host-spawned bot visible", bot != null);
+                if (!bot) return true;
+                botUid = bot.m_UniqueID;
+                GameStateManager.Instance.GetCurrentState().GetComponent<GameStateNormal>().SetSelectedWorker(bot.GetComponent<Worker>(), true, false);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var ed = TeachWorkerScriptEdit.Instance;
+                bool ok = ed != null && ed.m_CurrentTarget && ed.m_CurrentTarget.m_UniqueID == botUid;
+                if (!ok && el < 5f) return false;
+                if (!ok) { TestBot.Assert("client: bot selected in script editor", false); return true; }
+                ed.OnClickTeach();     // the Record button
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = GameStateManager.Instance.GetActualState() == GameStateManager.State.TeachWorker;
+                if (!ok && el < 5f) return false;
+                TestBot.Assert("client: in teach mode", ok);
+                BotState = null; var n = new JSONObject(); n["a"] = "test_botstate"; n["w"] = botUid; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+                return true;
+            });
+            s.Add(el =>
+            {
+                if (BotState == null && el < 10f) return false;
+                TestBot.Assert("host: bot is learning and joiner's player is recording", BotState != null && BotState["learning"].AsBool && BotState["teaching"].AsBool,
+                    BotState == null ? "no reply" : BotState.ToString());
+                // teach: pick up the nearest stick
+                var stick = Nearest(ObjectType.Stick, 25);
+                TestBot.Assert("client: found a stick to teach with", stick != null);
+                if (stick) Click(Tile(stick), stick, AFO.AT.Primary);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var ed = TeachWorkerScriptEdit.Instance;
+                int count = ed != null && ed.m_Instructions != null ? HighInstruction.GetInstructionCount(ed.m_Instructions.m_List) : 0;
+                if (count < 1 && el < 40f) return false;
+                TestBot.Assert("client: recorded actions became instructions in the editor", count >= 1, "instructions " + count + ", relayed " + Teach.Received);
+                Plugin.Log("[test] editor instructions " + count);
+                ed.OnClickGo();         // the Play button
+                return true;
+            });
+            s.Add(el =>
+            {
+                if (el < 3f) return false;
+                if (UnityEngine.Time.realtimeSinceStartup > nextBotQuery)
+                {
+                    nextBotQuery = UnityEngine.Time.realtimeSinceStartup + 2f; BotState = null;
+                    var n = new JSONObject(); n["a"] = "test_botstate"; n["w"] = botUid; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+                }
+                bool ok = BotState != null && BotState["n"].AsInt >= 1 && (BotState["running"].AsBool || BotState["started"].AsBool || BotState["carry"].AsInt > 0) && !BotState["learning"].AsBool;
+                if (ok) lastGood = BotState;
+                if (!ok && lastGood == null && el < 30f) return false;
+                if (lastGood != null) { ok = true; BotState = lastGood; }
+                TestBot.Assert("host: bot got the joiner's script and runs it", ok, BotState == null ? "no reply" : BotState.ToString());
+                return true;
+            });
+            s.Add(el =>
+            {
+                // Leave the editor; the joiner's copy of the bot then catches up with the host's (script included).
+                // (The taught stick is in the joiner's hands, so the bot's run itself ends with a question mark;
+                // the host-side check above covers that it ran.)
+                if (el < 0.5f) { GameStateManager.Instance.GetCurrentState().GetComponent<GameStateNormal>()?.ClearSelectedWorkers(); return false; }
+                var b = Obj(botUid);
+                int n = b ? b.GetComponent<Worker>().m_WorkerInterpreter.m_HighInstructions.m_List.Count : 0;
+                bool ok = n >= 1 && Teach.EditingUid() != botUid;
+                if (!ok && el < 25f) return false;
+                TestBot.Assert("client: bot's taught script visible on the joiner after closing the editor", ok, "instructions " + n);
+                return true;
+            });
+            // 9. whole-world consistency after things settle
             s.Add(el => el > 25f);   // covers at least two anti-entropy rounds
             s.Add(el => { Chk = null; var n = new JSONObject(); n["a"] = "chk"; Coop.I.Client.Host.Send(Msg.Input, n.ToString()); return true; });
             s.Add(el =>
             {
-                if (Chk == null && el < 10f) return false;
+                if (Chk == null && el < 15f) return false;
                 Checksum(out int c, out long sum);
                 bool ok = Chk != null && Chk["count"].AsInt == c && Chk["sum"].Value == sum.ToString();
+                // Animals/timers can change on the host inside one 200 ms scan window; ask again a few times.
+                if (Chk != null && !ok && chkTries < 4)
+                {
+                    chkTries++; Plugin.Log("[test] checksum differs, retry " + chkTries);
+                    Chk = null; var rq = new JSONObject(); rq["a"] = "chk"; Coop.I.Client.Host.Send(Msg.Input, rq.ToString());
+                    return false;
+                }
                 if (Chk != null && !ok)
                 {
                     var mine = Hashes(); var theirs = new Dictionary<int, int>();
@@ -245,7 +439,7 @@ namespace AutonautsCoop
                         else if (mine.TryGetValue(kv.Key, out int h) && h != kv.Value && shown++ < 45) Plugin.Log("[test] differs: " + kv.Key + " " + Sync.SaveObject(Obj(kv.Key), out _));
                 }
                 TestBot.Assert("client: world checksum matches host", ok, Chk == null ? "no reply" : "host " + Chk["count"].AsInt + "/" + Chk["sum"].Value + " client " + c + "/" + sum);
-                Plugin.Log("[test] stats inplace " + Sync.StatInPlace + " recreated " + Sync.StatRecreated + " created " + Sync.StatCreated + " removed " + Sync.StatRemoved + " batches " + Sync.StatBatches + " resync " + Sync.StatResync + " errors " + Sync.StatErrors + " digests " + Sync.StatDigests + " digestfixes " + Sync.StatDigestFixes);
+                Plugin.Log("[test] stats inplace " + Sync.StatInPlace + " recreated " + Sync.StatRecreated + " created " + Sync.StatCreated + " removed " + Sync.StatRemoved + " batches " + Sync.StatBatches + " resync " + Sync.StatResync + " errors " + Sync.StatErrors + " digests " + Sync.StatDigests + " digestfixes " + Sync.StatDigestFixes + " swept " + Sync.StatSwept);
                 foreach (var kv in Sync.RecreatedByType) Plugin.Log("[test]   recreated " + kv.Key + " x" + kv.Value);
                 return true;
             });

@@ -1,5 +1,5 @@
 // AutonautsCoop - Net.cs - framed TCP transport
-// Version 0.0.2 - 2026-10-20 - Created with Claude
+// Version 0.2.0 - 2026-10-20 - Created with Claude
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -24,26 +24,39 @@ namespace AutonautsCoop
 
     public class Packet { public Msg Type; public byte[] Data; public Peer From; }
 
-    /// One TCP connection. Frames: int32 length (LE, includes type byte), byte type, payload.
-    public class Peer
+    /// A connection to one other player, over any transport.
+    public abstract class Peer
     {
-        public readonly int Id;
+        static int nextId = 1;
+        public readonly int Id = nextId++;
+        public volatile bool Alive = true;
+        public string Name = "?";
+        public float LastHeard = -1f;   // set on the main thread by SteamNet.Pump
+        public abstract void Send(Msg t, byte[] data);
+        public void Send(Msg t, string s) { Send(t, Encoding.UTF8.GetBytes(s)); }
+        public abstract void Close();
+        public abstract string Describe();
+    }
+
+    /// One TCP connection. Frames: int32 length (LE, includes type byte), byte type, payload.
+    public class TcpPeer : Peer
+    {
         readonly TcpClient tcp;
         readonly NetworkStream stream;
         readonly Queue<byte[]> sendQ = new Queue<byte[]>();
         readonly AutoResetEvent sendSignal = new AutoResetEvent(false);
         readonly Queue<Packet> inbox;
-        public volatile bool Alive = true;
-        public string Name = "?";
 
-        public Peer(int id, TcpClient c, Queue<Packet> inbox)
+        public TcpPeer(TcpClient c, Queue<Packet> inbox)
         {
-            Id = id; tcp = c; tcp.NoDelay = true; stream = c.GetStream(); this.inbox = inbox;
+            tcp = c; tcp.NoDelay = true; stream = c.GetStream(); this.inbox = inbox;
             new Thread(RecvLoop) { IsBackground = true, Name = "coop-recv" }.Start();
             new Thread(SendLoop) { IsBackground = true, Name = "coop-send" }.Start();
         }
 
-        public void Send(Msg t, byte[] data)
+        public override string Describe() { try { return "tcp " + tcp.Client.RemoteEndPoint; } catch { return "tcp"; } }
+
+        public override void Send(Msg t, byte[] data)
         {
             var frame = new byte[5 + data.Length];
             BitConverter.GetBytes(data.Length + 1).CopyTo(frame, 0);
@@ -52,8 +65,6 @@ namespace AutonautsCoop
             lock (sendQ) sendQ.Enqueue(frame);
             sendSignal.Set();
         }
-        public void Send(Msg t, string s) { Send(t, Encoding.UTF8.GetBytes(s)); }
-
         void SendLoop()
         {
             try
@@ -110,7 +121,7 @@ namespace AutonautsCoop
             Plugin.Log("peer " + Id + " closed (" + why + ")");
             try { tcp.Close(); } catch { }
         }
-        public void Close() { Fail("local close"); }
+        public override void Close() { Fail("local close"); }
     }
 
     public class NetHost
@@ -118,9 +129,9 @@ namespace AutonautsCoop
         TcpListener listener;
         public readonly List<Peer> Peers = new List<Peer>();
         public readonly Queue<Packet> Inbox = new Queue<Packet>();
-        int nextId = 1;
+        public void Add(Peer p) { lock (Peers) Peers.Add(p); Plugin.Log("peer " + p.Id + " added (" + p.Describe() + ")"); }
 
-        public void Start(int port)
+        public void StartTcp(int port)
         {
             listener = new TcpListener(IPAddress.Any, port);
             listener.Start();
@@ -131,9 +142,7 @@ namespace AutonautsCoop
                     while (true)
                     {
                         var c = listener.AcceptTcpClient();
-                        var p = new Peer(nextId++, c, Inbox);
-                        lock (Peers) Peers.Add(p);
-                        Plugin.Log("accepted peer " + p.Id + " from " + c.Client.RemoteEndPoint);
+                        Add(new TcpPeer(c, Inbox));
                     }
                 }
                 catch (Exception e) { Plugin.Log("listener stopped: " + e.Message); }
@@ -161,7 +170,7 @@ namespace AutonautsCoop
         {
             var c = new TcpClient();
             c.Connect(ip, port);
-            Host = new Peer(0, c, Inbox);
+            Host = new TcpPeer(c, Inbox);
             Plugin.Log("connected to " + ip + ":" + port);
         }
     }

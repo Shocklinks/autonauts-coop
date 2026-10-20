@@ -130,24 +130,32 @@ namespace AutonautsCoop
             foreach (var e in TopLevel()) sentHash[e.B.m_UniqueID] = e.Hash;
         }
 
-        /// Nearest in-bounds, non-solid tile next to a position (the host may stand at the map edge).
-        public static TileCoord FreeTileNear(TileCoord c)
+        /// Nearest in-bounds, walkable, dry, unbuilt tile near a position (the host may stand at the map edge).
+        /// includeCenter: the position itself counts. Tiles with nothing standing on them are preferred.
+        public static TileCoord FreeTileNear(TileCoord c, bool includeCenter = false)
         {
-            for (int r = 1; r < 8; r++)
+            TileCoord? fallback = null;
+            for (int r = includeCenter ? 0 : 1; r < 10; r++)
                 for (int dy = -r; dy <= r; dy++)
                     for (int dx = -r; dx <= r; dx++)
                     {
                         if (Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dy)) != r) continue;
                         var t = new TileCoord(c.x + dx, c.y + dy);
                         var tile = TileManager.Instance.GetTile(t);
-                        if (tile != null && !Tile.GetIsSolid(tile.m_TileType)) return t;
+                        if (tile == null || Tile.GetIsSolid(tile.m_TileType) || tile.m_Building || tile.m_Floor) continue;
+                        if (tile.m_TileType.ToString().Contains("Water")) continue;
+                        var objs = PlotManager.Instance.GetPlotAtTile(t).GetObjectsTypeAtTile(t);
+                        if (objs == null || objs.Count == 0) return t;
+                        if (fallback == null) fallback = t;
                     }
-            return c;
+            return fallback ?? c;
         }
 
         public static void HostTick()
         {
             if (Coop.I.Host == null || !Coop.InGame()) return;
+            RetryPendingInput();
+            Teach.HostTick();
             bool anyPeer;
             lock (Coop.I.Host.Peers) anyPeer = Coop.I.Host.Peers.Exists(x => x.Alive && x.Name != "?");
             if (!anyPeer) return;
@@ -221,6 +229,22 @@ namespace AutonautsCoop
             }
         }
 
+        class PendingGo { public string Json; public Peer From; public float Until; }
+        static readonly Dictionary<int, PendingGo> pendingGo = new Dictionary<int, PendingGo>();
+        static bool Busy(Farmer f) => f.m_State != Farmer.State.None && f.m_State != Farmer.State.Moving && f.m_State != Farmer.State.RequestMove && !f.CheckCanAbortAction();
+
+        static void RetryPendingInput()
+        {
+            if (pendingGo.Count == 0) return;
+            foreach (var uid in new List<int>(pendingGo.Keys))
+            {
+                var p = pendingGo[uid];
+                var o = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
+                if (!o || Time.realtimeSinceStartup > p.Until) { pendingGo.Remove(uid); continue; }
+                if (!Busy(o.GetComponent<Farmer>())) { pendingGo.Remove(uid); HostApplyInput(p.From, p.Json); }
+            }
+        }
+
         public static void HostRecordTile(TileCoord c, Tile.TileType t)
         {
             if (Coop.Role == Role.Host) tileQ.Add(new[] { c.x, c.y, (int)t });
@@ -254,6 +278,35 @@ namespace AutonautsCoop
                 return;
             }
             if ((string)n0["a"] == "test_hostact") { if (TestBot.Active) TestScript.HostActRequested = true; return; }
+            if ((string)n0["a"] == "test_givebot" && TestBot.Active && PeerPlayers.TryGetValue(from, out int pb))
+            {
+                var pl = ObjectTypeList.Instance.GetObjectFromUniqueID(pb, false);
+                var at = FreeTileNear(pl.GetComponent<TileCoordObject>().m_TileCoord);
+                var w = ObjectTypeList.Instance.CreateObjectFromIdentifier(ObjectType.Worker, at.ToWorldPositionTileCentered(), Quaternion.identity).GetComponent<Worker>();
+                w.SetFrame(ObjectType.WorkerFrameMk0); w.SetDrive(ObjectType.WorkerDriveMk0); w.SetHead(ObjectType.WorkerHeadMk0);
+                Plugin.Log("[test] spawned bot uid " + w.m_UniqueID + " at " + at.x + "," + at.y);
+                return;
+            }
+            if ((string)n0["a"] == "test_botstate" && TestBot.Active)
+            {
+                var o = ObjectTypeList.Instance.GetObjectFromUniqueID(n0["w"].AsInt, false);
+                var w = o ? o.GetComponent<Worker>() : null;
+                var r = new JSONObject(); var st = new JSONObject();
+                if (w)
+                {
+                    st["n"] = w.m_WorkerInterpreter.m_HighInstructions.m_List.Count;
+                    st["running"] = w.m_WorkerInterpreter.GetCurrentScript() != null;
+                    st["started"] = Teach.LastStarted == w.m_UniqueID;
+                    st["learning"] = w.m_Learning;
+                    st["carry"] = w.m_FarmerCarry.m_CarryObject.Count;
+                    st["x"] = w.m_TileCoord.x; st["y"] = w.m_TileCoord.y;
+                    PeerPlayers.TryGetValue(from, out int fu);
+                    var fpo = ObjectTypeList.Instance.GetObjectFromUniqueID(fu, false);
+                    st["teaching"] = fpo && fpo.GetComponent<FarmerPlayer>().m_Teaching;
+                }
+                r["botstate"] = st; from.Send(Msg.Info, r.ToString());
+                return;
+            }
             if ((string)n0["a"] == "test_giveaxe" && TestBot.Active && PeerPlayers.TryGetValue(from, out int pu))
             {
                 // test fixture only: drop a stone axe next to that player
@@ -263,11 +316,13 @@ namespace AutonautsCoop
                 Plugin.Log("[test] spawned axe uid " + axe.m_UniqueID + " at " + at.x + "," + at.y);
                 return;
             }
+            if (Build.HostApply((string)n0["a"], n0)) return;
             if (!PeerPlayers.TryGetValue(from, out int uid)) return;
             var fpObj = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
             if (!fpObj) return;
             var fp = fpObj.GetComponent<FarmerPlayer>();
             var n = JSON.Parse(json);
+            if (Teach.HostApply((string)n["a"], n, fp)) return;
             switch ((string)n["a"])
             {
                 case "go":
@@ -276,7 +331,17 @@ namespace AutonautsCoop
                     // Plot UIDs are assigned locally on each machine, so plots are sent as "the plot at dest".
                     BaseClass target = t >= 0 ? ObjectTypeList.Instance.GetObjectFromUniqueID(t, false) : t == -2 ? PlotManager.Instance.GetPlotAtTile(dest) : null;
                     if (t >= 0 && !target) { Plugin.Log("input target " + t + " not found on host"); break; }
+                    // Mid-action (picking up, chopping...) the game ignores clicks it can't abort. The joiner can't
+                    // see that animation reliably, so hold the latest click and retry for a moment.
+                    if (Busy(fp)) { pendingGo[uid] = new PendingGo { Json = json, From = from, Until = Time.realtimeSinceStartup + 3f }; break; }
+                    pendingGo.Remove(uid);
                     fp.GoToAndAction(dest, target ? target.GetComponent<Actionable>() : null, (AFO.AT)n["k"].AsInt);
+                    if (TestBot.Active)
+                    {
+                        var tl = TileManager.Instance.GetTile(dest);
+                        Plugin.Log("[test] input go " + dest.x + "," + dest.y + " k" + n["k"].AsInt + " target " + (target ? target.m_TypeIdentifier.ToString() : "none")
+                            + " tile " + (tl != null ? tl.m_TileType.ToString() : "-") + " -> state " + fp.m_State + " carrying " + fp.m_FarmerCarry.m_CarryObject.Count);
+                    }
                     break;
             }
         }
@@ -288,9 +353,16 @@ namespace AutonautsCoop
 
         public static void QueueEarlyDelta(byte[] d) { early.Add(d); }
 
+        public static readonly HashSet<int> HostKnown = new HashSet<int>();
+        public const int LocalUidBase = 1000000000;
+
         public static void OnClientLoaded()
         {
             TimeManager.Instance.EnableNormalTime(false);
+            foreach (var kv in Savables()) if (kv.Key && kv.Key.m_UniqueID > 0) HostKnown.Add(kv.Key.m_UniqueID);
+            // Objects the joiner creates locally (edit-mode cursor/previews, effects) get UIDs from a range the
+            // host never reaches, so they can't collide with objects the host creates later.
+            ObjectTypeList.Instance.SetUniqueIDCounter(LocalUidBase);
             foreach (var d in early) ClientApplyDelta(Gz.Unpack(d));
             early.Clear();
         }
@@ -360,12 +432,16 @@ namespace AutonautsCoop
             foreach (var e in TopLevel())
             {
                 var b = e.B;
+                if (b.m_UniqueID == Teach.EditingUid()) { theirs.Remove(b.m_UniqueID); continue; }
                 if (!theirs.TryGetValue(b.m_UniqueID, out int h)) { extra.Add(b); continue; }
                 if (e.Hash != h) need.Add(b.m_UniqueID);
                 theirs.Remove(b.m_UniqueID);
             }
             foreach (var uid in theirs.Keys) need.Add(uid);   // host has, we don't
-            foreach (var b in extra) { Plugin.Log("digest: removing extra " + b.m_UniqueID + " " + b.m_TypeIdentifier); b.StopUsing(); }
+            foreach (var b in extra)
+            {
+                Plugin.Log("digest: removing extra " + b.m_UniqueID + " " + b.m_TypeIdentifier); Destroy(b);
+            }
             if (need.Count > 0)
             {
                 Plugin.Log("digest: requesting " + need.Count + " objects");
@@ -374,25 +450,47 @@ namespace AutonautsCoop
             StatDigestFixes += need.Count + extra.Count;
         }
 
+        /// Remove an object on the client. Buildings must also leave the tile map (Building.StopUsing doesn't),
+        /// or tiles keep pointing at a destroyed building.
+        public static void Destroy(BaseClass b)
+        {
+            if (!b) return;
+            var bld = b.GetComponent<Building>();
+            if (bld)
+            {
+                try { MapManager.Instance.RemoveBuilding(bld); BuildingManager.Instance.RefreshBuilding(bld); }
+                catch (Exception e) { Plugin.Log("map remove failed for " + b.m_UniqueID + ": " + e.Message); }
+            }
+            b.StopUsing();
+        }
+
         static void Remove(int uid)
         {
             var b = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
-            if (b) { b.StopUsing(); StatRemoved++; }
+            if (b) { Destroy(b); StatRemoved++; }
             targetPos.Remove(uid); targetRot.Remove(uid);
         }
 
         static void Upsert(JSONNode o)
         {
             int uid = o["UID"].AsInt;
+            if (uid == Teach.EditingUid()) { frozenSkipped = uid; return; }   // the editor UI holds this bot
             var b = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
+            bool reselect = Coop.Role == Role.Client && Teach.IsSelected(b);
+            try { UpsertInner(o, uid, b); }
+            finally { if (reselect && ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) != b) Teach.Reselect(uid); }
+        }
+
+        static void UpsertInner(JSONNode o, int uid, BaseClass b)
+        {
             string want = o.ToString();
             var nested = new List<int>();
             CollectUIDs(want, uid, nested);
             if (nested.Count > 0)
             {
                 // Children (carried items, nests, contents) are rebuilt by the parent's Load; clear them first.
-                foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) cb.StopUsing(); touchedNested.Add(c); }
-                if (b) { b.StopUsing(); StatRecreated++; Count("nested:" + (string)o["ID"]); }
+                foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); touchedNested.Add(c); }
+                if (b) { Destroy(b); StatRecreated++; Count("nested:" + (string)o["ID"]); }
                 else StatCreated++;
                 Create(o);
                 return;
@@ -400,7 +498,9 @@ namespace AutonautsCoop
             if (b)
             {
                 var wantType = ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false);
-                if (b.m_TypeIdentifier == wantType)
+                var bld = b.GetComponent<Building>();
+                bool moved = bld && (bld.m_TileCoord.x != o["TX"].AsInt || bld.m_TileCoord.y != o["TY"].AsInt || bld.m_Rotation != o["Rotation"].AsInt);
+                if (b.m_TypeIdentifier == wantType && !moved)
                 {
                     try
                     {
@@ -415,7 +515,7 @@ namespace AutonautsCoop
                     catch (Exception e) { Plugin.Log("in-place load failed for " + o["ID"] + ": " + e.Message); }
                 }
                 Count((string)o["ID"]);
-                if (b) b.StopUsing();
+                if (b) Destroy(b);
                 StatRecreated++;
             }
             else StatCreated++;
@@ -453,7 +553,8 @@ namespace AutonautsCoop
             if (type == ObjectTypeList.m_Total) { Plugin.Log("unknown type " + o["ID"]); return null; }
             // A client-local object may hold this UID (spawn effects etc). Host wins.
             var clash = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
-            if (clash) clash.StopUsing();
+            if (clash) Destroy(clash);
+            HostKnown.Add(uid);
             var b = ObjectTypeList.Instance.CreateObjectFromSaveName(o, Vector3.zero, Quaternion.identity);
             if (!b) return null;
             b.GetComponent<Savable>().Load(o);
@@ -462,12 +563,41 @@ namespace AutonautsCoop
             b.GetComponent<Savable>().PostLoad();
             b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
             if (b.m_UniqueID != uid) Plugin.Log("UID mismatch on create: wanted " + uid + " got " + b.m_UniqueID);
+            if (uid == MyPlayerUID) Teach.AttachToMyPlayer();
             return b;
         }
 
+        static int frozenSkipped = -1, lastEditing = -1;
+        static float nextSweep;
+        public static int StatSwept;
         public static void ClientFrame()
         {
             if (!Coop.I.ClientLoaded) return;
+            int editing = Teach.EditingUid();
+            if (editing != lastEditing)
+            {
+                // editor closed (or switched bot): fetch the bot's current state now instead of waiting for the digest
+                if (lastEditing >= 0 && lastEditing == frozenSkipped)
+                {
+                    var r = new JSONObject(); var u = new JSONArray(); u.Add(lastEditing); r["a"] = "need"; r["u"] = u;
+                    Coop.I.Client.Host.Send(Msg.Input, r.ToString());
+                    frozenSkipped = -1;
+                }
+                lastEditing = editing;
+            }
+            if (Time.realtimeSinceStartup >= nextSweep)
+            {
+                // Side effects of applying host state (e.g. a felled tree dropping logs and seeds) can spawn
+                // savable objects locally. They carry local-range UIDs; the host's real ones arrive by sync.
+                nextSweep = Time.realtimeSinceStartup + 0.5f;
+                List<BaseClass> local = null;
+                foreach (var kv in Savables())
+                {
+                    var b = kv.Key;
+                    if (b && b.m_UniqueID >= LocalUidBase && b.GetComponent<Savable>().GetIsSavable()) (local ?? (local = new List<BaseClass>())).Add(b);
+                }
+                if (local != null) foreach (var b in local) { StatSwept++; Destroy(b); }
+            }
             float k = Mathf.Clamp01(Time.unscaledDeltaTime * 12f);
             var drop = new List<int>();
             foreach (var kv in targetPos)

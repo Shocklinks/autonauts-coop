@@ -93,6 +93,7 @@ namespace AutonautsCoop
             SessionManager.Instance.LoadLevel(false, "Main");
         }
 
+        public static string Transport = Environment.GetEnvironmentVariable("COOP_TRANSPORT") ?? "tcp";
         public static string Ip => ip;
         public static int Port => port;
     }
