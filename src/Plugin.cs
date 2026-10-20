@@ -20,7 +20,7 @@ namespace AutonautsCoop
             Instance = this;
             LogPath = Path.Combine(Paths.BepInExRootPath, "coop.log");
             File.WriteAllText(LogPath, "");
-            Log("AutonautsCoop 0.2.0 loaded. Unity " + Application.unityVersion);
+            Log("AutonautsCoop " + Version + " loaded. Unity " + Application.unityVersion);
             Application.runInBackground = true;
             new Harmony("autonauts.coop").PatchAll();
             Log("patched");
