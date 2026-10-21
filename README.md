@@ -82,6 +82,10 @@ framing/peer code over a UDP stand-in (`COOP_TRANSPORT=udp`); only lobbies and i
 2. Put `AutonautsCoop.dll` in `BepInEx\plugins`.
 3. Host: load a world, F8 -> Host this world. Joiner: main menu, F8 -> IP -> Join.
 
+## Continuing development
+
+See [HANDOFF.md](HANDOFF.md): source map, environment setup, test and release steps.
+
 ## Build
 
 No NuGet needed. Compiles with Roslyn from the .NET 8 SDK against the game's own assemblies:
@@ -89,6 +93,11 @@ No NuGet needed. Compiles with Roslyn from the .NET 8 SDK against the game's own
 ```
 ./build.sh "<game dir>" "<extracted BepInEx dir>" out
 ```
+
+## Package
+
+`tools/package.sh "<extracted BepInEx dir>" out/AutonautsCoop.dll <version> AutonautsCoop-<version>.zip` builds the
+player download (BepInEx + plugin + README-COOP.txt, extracts into the game folder).
 
 ## Test
 
