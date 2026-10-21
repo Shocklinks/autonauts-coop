@@ -3,15 +3,16 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.8.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.10.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 59/59 over TCP, 49/49 over the Steam-style wire)
+## What works (automated two-instance test: 101/101 over TCP, 84/84 over the Steam-style wire, 7/7 big-base stress test)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
 - Host movement, tile changes and new objects reach the joiner.
 - Joiner edit mode: place, drag-place (paths, walls, fences), move/rotate and delete buildings and blueprints.
-  The request goes to the host; the result comes back through sync. No undo for joiners.
+  The request goes to the host; the result comes back through sync. Undo works for the joiner's last edit (place,
+  drag-place, move, delete; an undone delete comes back as a blueprint).
 - Joiners teach bots: select a bot, Record, do the work, Play. The host's copy of the joiner records the actions,
   streams them back to the joiner's script editor, and runs the finished script on the real bot. Stop, pause, step
   and whistle calls are forwarded too. The bot being taught is left alone by sync until the editor closes.
@@ -24,28 +25,45 @@ Status: **alpha 0.8.0**. Not affiliated with Denki or Curve Games. Contains no g
 - World state follows the host live: quests/research progress, building and object unlocks (build palette),
   resources, time of day, the saved script library, bot groups, offworld missions and the wardrobe's stored clothes.
 - Wardrobe and aquarium screens open on the joiner; taking or storing clothes/fish goes through the host.
-  Catapult and spaceport screens are host-only (joiners get a notice).
-- If the host leaves (quits, crashes, times out or goes back to its menu), joiners get a message and return to the
-  main menu. If the host leaves the world, hosting stops.
+- Bot server / script library: joiners upload, rename, delete and sort scripts and folders, and link, unlink or
+  download scripts to bots and data storages. Library changes sync both ways (last edit wins if two people change
+  it at the same moment).
+- Catapult: joiners aim it. Spaceport: joiners accept, stop and decline missions (the host rolls new ones).
+- Planning mode: joiners draw, move, resize, name and delete planning areas; everyone sees everyone's areas.
+  Show/hide toggles stay per player.
+- Game speed: the host's speed (and pause) applies to everyone; joiners can't change it and see "Host paused".
+- Bot groups: joiners create, rename, recolour, nest and delete groups and move bots between them; group Play, Stop,
+  Pause, Drop and Call run on the host (Call brings the bots to the joiner who pressed it).
+- "X joined the game" / "X left the game" notices for everyone.
+- If the host ends the session (quits, goes back to its menu, stops hosting), joiners see "Host has ended the
+  lobby." and return to the main menu; if the connection drops it says "(connection lost)".
 - Animations on the joiner: farmers' actions (chop, dig, idle...) are mirrored from the host; walking hops are
   reproduced from movement.
-- A joiner who leaves keeps their character; rejoining gets it (and its pockets) back, matched by SteamID on Steam
-  and by name on IP. This survives the host saving, quitting and loading the world again (the save records who
-  owns which character; the host always gets its own back).
+- When a joiner leaves (or drops), their character leaves the host's world and is stored: position, hands, pockets,
+  upgrades and clothes. Rejoining brings it back where they stood, or next to the host if something was built on
+  that spot meanwhile. Matched by SteamID on Steam, by name on IP. Stored characters are saved in the host's world
+  save, so this survives the host quitting and loading the world later (the host always gets its own character).
+- Joiners don't autosave. Save As writes the joiner's own copy of the world; loading it later in single player they
+  play their own character.
+- Bug report: F8 > Save bug report writes one zip (BepInEx\bugreports) with logs, versions and sync stats. On a
+  joiner it includes the host's log too.
 - Version check: host and joiner must run the same AutonautsCoop and Autonauts version. A mismatched joiner is
   refused with a message saying which versions differ.
 - Joiner clicks made while their character is mid-action are held for up to 3 s and retried.
 - Self-healing: every 10 s the host sends a (uid, hash) digest; the joiner re-requests anything that drifted.
+- Big bases: change detection is incremental (moving things every scan, the rest within ~5 s), so scan cost grows
+  slowly with base size. Stress test: 8,000 objects with 400 bots and 4,000 items — join in ~70 s, world matches.
 
 ## Not done / known issues
 
-- Joiners editing the script library (saving/renaming stored scripts) isn't forwarded yet; they see the host's.
-- Bot server menu, catapult, spaceport, planning mode and game speed are host-only for now.
+- Planning areas sync when the editor leaves planning mode (and while drawing); two people editing areas at the
+  same moment: last one wins.
 - An unlock that lands while a joiner has edit mode open shows after they reopen edit mode.
 - Steam invites are written but **not yet tested on real Steam** (needs two PCs, two accounts that each own the game).
-- A joiner who disconnects leaves their character standing until they rejoin.
-- Joiners on 0.7.0 or older can't get the version message from a 0.8.0 host (they just get disconnected).
-- Not tested over the internet or on large late-game bases.
+- Joiners on 0.7.0 or older can't get the version message from a 0.8.0+ host (they just get disconnected).
+- Not tested over the internet. The big-base test ran on a small map (two medium maps didn't fit this test
+  machine's memory); real medium/large late-game worlds still need a real-PC test.
+- Changes to things that don't move (e.g. storage contents) reach joiners within ~5 s instead of instantly.
 
 ## Connecting
 
@@ -76,7 +94,8 @@ No NuGet needed. Compiles with Roslyn from the .NET 8 SDK against the game's own
 
 `test/run.sh "<game dir>" "<BepInEx dir>" <work dir>` copies the game into two folders, runs both under Wine + Xvfb
 with separate prefixes, and drives them with in-game bots (`COOP_TEST=host|client`) through the real input path.
-Results: `<work dir>/{host,client}/BepInEx/coop_test_*.txt`. Add `COOP_TRANSPORT=udp` to test the Steam framing path.
+Results: `<work dir>/{host,client}/BepInEx/coop_test_*.txt`. Add `COOP_TRANSPORT=udp` to test the Steam framing path,
+or `COOP_BIG=1` for the big-base stress test (`COOP_BIG_BOTS`, `COOP_BIG_BUILDINGS`, `COOP_BIG_ITEMS` set its size).
 
 The test copies get a `steam_appid.txt` so they start without the Steam client. Test use only; never ship it.
 

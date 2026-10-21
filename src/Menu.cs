@@ -1,6 +1,7 @@
 // AutonautsCoop - Menu.cs - F8 window: host / join / status
 // Version 0.5.0 - 2026-10-20 - Created with Claude
 using System;
+using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -9,7 +10,7 @@ namespace AutonautsCoop
     public class Menu : MonoBehaviour
     {
         bool show;
-        Rect rect = new Rect(40, 40, 360, 300);
+        Rect rect = new Rect(40, 40, 380, 400);
         string ip, port, status = "";
         ConfigEntry<string> cfgIp;
         ConfigEntry<int> cfgPort;
@@ -29,24 +30,39 @@ namespace AutonautsCoop
         }
 
         static string toast; static float toastUntil;
-        public static void Toast(string s) { toast = s; toastUntil = Time.realtimeSinceStartup + 3f; Plugin.Log("toast: " + s); }
+        public static string LastToast;
+        public static readonly List<string> Toasts = new List<string>();   // tests
+        public static void Toast(string s) { toast = s; LastToast = s; Toasts.Add(s); toastUntil = Time.realtimeSinceStartup + 4f; Plugin.Log("toast: " + s); }
 
         void OnGUI()
         {
             try { Locks.OnGUI(); } catch (Exception e) { Plugin.Log("lock label: " + e.Message); }
             if (toast != null && Time.realtimeSinceStartup < toastUntil)
                 GUI.Box(new Rect(Screen.width / 2 - 200, Screen.height / 2 - 120, 400, 28), toast);
-            if (Coop.Role == Role.Off && Session.LastDisconnect != null && Time.realtimeSinceStartup - Session.LastDisconnectAt < 20f)
-                GUI.Box(new Rect(Screen.width / 2 - 320, 40, 640, 48), Session.LastDisconnect);
+            if (Coop.Role == Role.Off && Session.LastDisconnect != null && TestBot.AtMainMenu())
+                GUI.Window(0x0C01, new Rect(Screen.width / 2 - 260, Screen.height / 2 - 70, 520, 140), DrawEnded, "Co-op");
             if (Coop.Role != Role.Off)
             {
                 string s = Coop.Role == Role.Host ? "Co-op host: " + PeerCount() + " joined (port " + Coop.I.Port + ")"
                          : Coop.I.ClientLoaded ? "Co-op: connected" : "Co-op: joining...";
                 if (Coop.Role == Role.Client && (Coop.I.Client?.Host == null || !Coop.I.Client.Host.Alive)) s = "Co-op: disconnected from host";
+                else if (Coop.Role == Role.Client && Coop.I.ClientLoaded && Speed.HostPaused) s += "   (host paused the game)";
+                if (Coop.Role == Role.Client && Coop.I.ClientLoaded && Speed.HostPaused)
+                    GUI.Box(new Rect(Screen.width / 2 - 120, 40, 240, 28), "Host paused the game");
                 GUI.Label(new Rect(10, Screen.height - 26, 600, 22), s + "   [" + cfgKey.Value + "]");
             }
             if (!show) return;
             rect = GUI.Window(0x0C00, rect, Draw, "Autonauts Co-op " + Plugin.Version);
+        }
+
+        void DrawEnded(int id)
+        {
+            GUILayout.BeginVertical();
+            GUILayout.FlexibleSpace();
+            GUILayout.Label(Session.LastDisconnect ?? "");
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("OK", GUILayout.Height(30))) Session.LastDisconnect = null;
+            GUILayout.EndVertical();
         }
 
         int PeerCount()
@@ -91,16 +107,18 @@ namespace AutonautsCoop
             else if (Coop.Role == Role.Host)
             {
                 GUILayout.Label("Hosting on port " + Coop.I.Port + ". Players: " + PeerCount());
-                GUILayout.Label("Save as usual; joiners never save.");
+                GUILayout.Label("Save as usual. Joiners' characters are stored with your save.");
                 if (SteamNet.SteamReady && GUILayout.Button("Invite Steam friends")) SteamNet.HostLobby();
             }
             else
             {
                 GUILayout.Label(Coop.I.ClientLoaded ? "Connected to host." : "Joining...");
-                GUILayout.Label("To leave: quit to desktop.");
+                GUILayout.Label("To leave: quit to the main menu. Autosave is off for joiners; Save As makes your own copy.");
             }
             GUILayout.Label(status);
             if (SteamNet.Status != "") GUILayout.Label("Steam: " + SteamNet.Status);
+            if (GUILayout.Button("Save bug report")) BugReport.Begin();
+            if (BugReport.Status != "") GUILayout.Label(BugReport.Status);
             GUILayout.EndVertical();
             GUI.DragWindow();
         }

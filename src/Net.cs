@@ -32,9 +32,12 @@ namespace AutonautsCoop
         public volatile bool Alive = true;
         public string Name = "?";
         public float LastHeard = -1f;   // set on the main thread by SteamNet.Pump
+        public static long BytesSent;   // stats (all peers)
         public abstract void Send(Msg t, byte[] data);
         public void Send(Msg t, string s) { Send(t, Encoding.UTF8.GetBytes(s)); }
         public abstract void Close();
+        /// Close after whatever is queued has gone out (used for "lobby ended" / refusal messages).
+        public virtual void CloseGracefully() { Close(); }
         public abstract string Describe();
     }
 
@@ -58,6 +61,7 @@ namespace AutonautsCoop
 
         public override void Send(Msg t, byte[] data)
         {
+            Interlocked.Add(ref BytesSent, data.Length + 5);
             var frame = new byte[5 + data.Length];
             BitConverter.GetBytes(data.Length + 1).CopyTo(frame, 0);
             frame[4] = (byte)t;
@@ -78,6 +82,7 @@ namespace AutonautsCoop
                         lock (sendQ) { if (sendQ.Count == 0) break; f = sendQ.Dequeue(); }
                         stream.Write(f, 0, f.Length);
                     }
+                    if (closing) { stream.Flush(); Thread.Sleep(200); Fail("closed after flush"); }
                 }
             }
             catch (Exception e) { Fail("send: " + e.Message); }
@@ -122,6 +127,8 @@ namespace AutonautsCoop
             try { tcp.Close(); } catch { }
         }
         public override void Close() { Fail("local close"); }
+        volatile bool closing;
+        public override void CloseGracefully() { closing = true; sendSignal.Set(); }
     }
 
     public class NetHost
@@ -158,7 +165,7 @@ namespace AutonautsCoop
         public void Stop()
         {
             try { listener?.Stop(); } catch { }
-            lock (Peers) { foreach (var p in Peers) p.Close(); Peers.Clear(); }
+            lock (Peers) { foreach (var p in Peers) p.CloseGracefully(); Peers.Clear(); }
         }
     }
 

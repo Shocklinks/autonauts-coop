@@ -28,7 +28,10 @@ namespace AutonautsCoop
         static void HostReq(string a, Action<JSONObject> args = null) { var n = new JSONObject(); n["a"] = a; args?.Invoke(n); Coop.I.Client.Host.Send(Msg.Input, n.ToString()); }
         static int axeUid = -1, treeUid = -1, logsBefore, bpUid = -1, dragCount, botUid = -1;
         public static JSONNode BotState; static JSONNode lastGood; static float nextBotQuery; static int carriedUid = -1; static float nextDragLog;
-        static void AskBot() { BotState = null; var n = new JSONObject(); n["a"] = "test_botstate"; n["w"] = botUid; Coop.I.Client.Host.Send(Msg.Input, n.ToString()); }
+        public static int askStep = -1;
+        /// Ask the host for the bot's state. Replies to asks from earlier steps are dropped (Coop.cs), so a slow
+        /// link can't hand a step an old answer, and a new ask doesn't throw away an answer still on its way.
+        static void AskBot() { if (askStep != TestBot.StepIndex) { BotState = null; askStep = TestBot.StepIndex; } var n = new JSONObject(); n["a"] = "test_botstate"; n["w"] = botUid; n["step"] = TestBot.StepIndex; Coop.I.Client.Host.Send(Msg.Input, n.ToString()); }
         /// Drive the inventory screen's own drag: hands of one bar -> hands of the other.
         static bool DragHands(bool toBot)
         {
@@ -244,6 +247,129 @@ namespace AutonautsCoop
                     Plugin.Log("[test] built wardrobe " + (b ? b.m_UniqueID : -1));
                     return true;
                 }
+                case "test_build":
+                {
+                    Sync.PeerPlayers.TryGetValue(from, out int pu);
+                    var pt = ObjectTypeList.Instance.GetObjectFromUniqueID(pu, false).GetComponent<TileCoordObject>().m_TileCoord;
+                    var type = ObjectTypeList.Instance.GetIdentifierFromSaveName(n["t"], false);
+                    Building b = null;
+                    foreach (var off in new[] { new TileCoord(4, 4), new TileCoord(-4, 4), new TileCoord(4, -4), new TileCoord(-4, -4), new TileCoord(0, 7), new TileCoord(7, 0), new TileCoord(-7, 0), new TileCoord(0, -7) })
+                    {
+                        var t = Sync.FreeTileNear(new TileCoord(pt.x + off.x, pt.y + off.y));
+                        b = BuildingManager.Instance.AddBuilding(t, type, 0, false, null, true);
+                        if (b) break;
+                    }
+                    if (b && b.GetComponent<SpacePort>() && OffworldMissionsManager.Instance.m_RegularMissionsAvailable.Count == 0)
+                        OffworldMissionsManager.Instance.SetupRegularMissions();
+                    Plugin.Log("[test] built " + (string)n["t"] + " " + (b ? b.m_UniqueID : -1));
+                    TestReply(from, "built", r => r["b"] = b ? b.m_UniqueID : -1);
+                    return true;
+                }
+                case "test_speed":
+                    TimeManager.Instance.SetTimeScale(n["fast"].AsBool ? TimeManager.m_FastTime : 1f);
+                    Plugin.Log("[test] host speed x" + TimeManager.Instance.m_TimeScale);
+                    return true;
+                case "test_pause":
+                    if (n["on"].AsBool) TimeManager.Instance.PauseAll(true); else TimeManager.Instance.UnPauseAll(true);
+                    return true;
+                case "test_hostscript":
+                {
+                    var hl = new HighInstructionList();
+                    WorkerScriptManager.Instance.AddScript("HostScript", hl, ObjectType.WorkerHeadMk0, -1, -1, Color.white);
+                    return true;
+                }
+                case "test_hostplan":
+                {
+                    Sync.PeerPlayers.TryGetValue(from, out int pu);
+                    var pt = ObjectTypeList.Instance.GetObjectFromUniqueID(pu, false).GetComponent<TileCoordObject>().m_TileCoord;
+                    var a2 = PlanningManager.Instance.NewArea(new TileCoord(pt.x - 6, pt.y - 6), new TileCoord(pt.x - 3, pt.y - 3));
+                    a2.SetName("HostPlan");
+                    return true;
+                }
+                case "test_q":
+                {
+                    Sync.PeerPlayers.TryGetValue(from, out int pu);
+                    var fp = ObjectTypeList.Instance.GetObjectFromUniqueID(pu, false)?.GetComponent<FarmerPlayer>();
+                    var o = ObjectTypeList.Instance.GetObjectFromUniqueID(n["w"].AsInt, false);
+                    TestReply(from, (string)n["q"], r =>
+                    {
+                        r["engaged"] = fp && fp.m_EngagedObject;
+                        switch ((string)n["q"])
+                        {
+                            case "speed": r["s"] = TimeManager.Instance.m_TimeScale; break;
+                            case "lib":
+                            {
+                                var names = new JSONArray(); foreach (var sc in WorkerScriptManager.Instance.m_Scripts) names.Add(sc.m_Name + "#" + sc.m_UID);
+                                r["names"] = names; r["folders"] = WorkerScriptManager.Instance.m_Folders.Count;
+                                var w = o ? o.GetComponent<Worker>() : null;
+                                r["link"] = w ? w.m_WorkerInterpreter.m_LinkedScriptUID : -2;
+                                break;
+                            }
+                            case "cat":
+                            {
+                                var c = o ? o.GetComponent<Catapult>() : null;
+                                if (c) { var t = c.GetTargetTile(); r["x"] = t.x; r["y"] = t.y; }
+                                break;
+                            }
+                            case "sp":
+                            {
+                                var om = OffworldMissionsManager.Instance;
+                                r["sel"] = om.m_SelectedMission != null ? om.m_SelectedMission.m_ID : -1;
+                                var ids = new JSONArray(); foreach (var m in om.m_RegularMissionsAvailable) ids.Add(m != null ? m.m_ID : -1); r["ids"] = ids;
+                                break;
+                            }
+                            case "grp":
+                            {
+                                var names = new JSONArray();
+                                foreach (var g in WorkerGroupManager.Instance.m_Groups) names.Add(g.m_Name + "#" + g.m_ID + ":" + string.Join(",", g.m_WorkerUIDs.ConvertAll(x => x.ToString()).ToArray()));
+                                r["names"] = names; r["lastcmd"] = Groups.LastCmd;
+                                break;
+                            }
+                            case "pk":
+                            {
+                                r["parked"] = Persist.ParkedCount; r["restored"] = Persist.Restored; r["relocated"] = Persist.Relocated; r["players"] = playersAtPark;
+                                bool left = false, joined = false; foreach (var t in Menu.Toasts) { if (t.EndsWith("left the game")) left = true; if (t.EndsWith("joined the game")) joined = true; }
+                                r["left"] = left; r["joined"] = joined;
+                                break;
+                            }
+                            case "plan":
+                            {
+                                var names = new JSONArray();
+                                foreach (var ar in Traverse.Create(PlanningManager.Instance).Field("m_PlanningArea").GetValue<List<PlanningArea>>()) names.Add(ar.m_Name);
+                                r["names"] = names;
+                                break;
+                            }
+                        }
+                    });
+                    return true;
+                }
+                case "test_blockspot":
+                {
+                    expectRejoinUntil = UnityEngine.Time.realtimeSinceStartup + 150f;
+                    Persist.OnParkedAt = t =>
+                    {
+                        Persist.OnParkedAt = null;
+                        playersAtPark = 0; foreach (var kv in Sync.Savables()) if (kv.Key && kv.Key.m_TypeIdentifier == ObjectType.FarmerPlayer) playersAtPark++;
+                        // the host builds right where the joiner stood
+                        var b = BuildingManager.Instance.AddBuilding(t, ObjectType.LogWall, 0, false, null, true);
+                        Plugin.Log("[test] host built on the joiner's spot " + t.x + "," + t.y + ": " + (b ? b.m_UniqueID : -1));
+                    };
+                    return true;
+                }
+                case "test_expectrejoin":
+                    expectRejoinUntil = UnityEngine.Time.realtimeSinceStartup + 150f;
+                    return true;
+                case "test_hostgroup":
+                {
+                    TabWorkers.Instance.NewGroup(null);
+                    var g = WorkerGroupManager.Instance.m_Groups[WorkerGroupManager.Instance.m_Groups.Count - 1];
+                    g.m_Name = "HostGroup";
+                    return true;
+                }
+                case "test_bugreport":
+                    BugReport.LastPath = null; BugReport.Begin();
+                    TestReply(from, "bug", r => r["path"] = BugReport.LastPath ?? "");
+                    return true;
                 case "test_hostquit":
                     HostQuitRequested = true;
                     return true;
@@ -254,9 +380,29 @@ namespace AutonautsCoop
             return false;
         }
         public static bool HostQuitRequested;
+        public static JSONNode Reply;   // client: last generic test reply ("tr" = kind)
+        static void TestReply(Peer to, string kind, Action<JSONObject> fill)
+        {
+            var r = new JSONObject(); r["tr"] = kind; fill(r); to.Send(Msg.Info, r.ToString());
+        }
+        static bool Got(string kind) => Reply != null && (string)Reply["tr"] == kind;
+        static void Ask(string q, int w = -1) { Reply = null; HostReq("test_q", n => { n["q"] = q; n["w"] = w; }); }
+        static float nextAsk;
+        /// ask every 1.5 s until ok(reply) or timeout; returns null while still waiting
+        static bool? Poll(float el, string q, int w, Func<JSONNode, bool> ok, float timeout = 20f)
+        {
+            if (Got(q) && ok(Reply)) return true;
+            if (el > timeout) return false;
+            if (UnityEngine.Time.realtimeSinceStartup > nextAsk) { nextAsk = UnityEngine.Time.realtimeSinceStartup + 1.5f; Ask(q, w); }
+            return null;
+        }
+        static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
+        static int groupId = -1, copyPlayer = -1, copyObjs = -1, autosBefore = -1, relocAtLeave = -1; static TileCoord undoTile, leaveTile, reloadTile; static float leaveAt;
+        static WorkerGroup G(int id) => WorkerGroupManager.Instance.GetGroupFromID(id);
+        static bool HasName(JSONNode arr, string name) { foreach (JSONNode x in arr.AsArray) if (((string)x).StartsWith(name)) return true; return false; }
 
         // ---- host: save the co-op world, stop, load it again, host again (what a player does the next day) ----
-        public static int SaveReloadPhase; static float phaseT, reloadedAt = -1; static int hostBefore;
+        public static int SaveReloadPhase; static float phaseT, reloadedAt = -1; static int hostBefore, relocBefore;
         const string ReloadSave = "coop_test_reload";
         static void SaveReloadTick()
         {
@@ -267,6 +413,7 @@ namespace AutonautsCoop
                 bool saved = SaveLoadManager.Instance.Save(ReloadSave);
                 TestBot.Assert("host: saved the co-op world", saved);
                 TestBot.Assert("host: save records the joiner's seat", Persist.Seats.Count >= 1, Persist.Seats.Count + " seat(s)");
+                relocBefore = Persist.Relocated;
                 Session.StopHost("test: reload");
                 SessionManager.Instance.m_LoadFileName = ReloadSave;
                 SessionManager.Instance.LoadLevel(true, "Main");
@@ -278,7 +425,7 @@ namespace AutonautsCoop
                 if (now - phaseT < 5f || !Coop.InGame() || GameStateManager.Instance.GetActualState() != GameStateManager.State.Normal) { SkipLoadCeremony(); return; }
                 if (now - phaseT < 12f) return;
                 int players = 0; foreach (var kv in Sync.Savables()) if (kv.Key && kv.Key.m_TypeIdentifier == ObjectType.FarmerPlayer) players++;
-                TestBot.Assert("host: reloaded world still has the joiner's character", players >= 2, players + " FarmerPlayers");
+                TestBot.Assert("host: reloaded world keeps the joiner's character stored, not standing in the world", players == 1 && Persist.Parked.Count == 1, players + " FarmerPlayers, " + Persist.Parked.Count + " stored");
                 TestBot.Assert("host: after reload the host controls its own character", Me().m_UniqueID == hostBefore, "player0 " + Me().m_UniqueID + " was " + hostBefore);
                 Coop.I.StartHost(TestBot.Port);
                 TestBot.Assert("host: hosting again after reload, same host player", Sync.HostPlayerUID == hostBefore, Sync.HostPlayerUID + " vs " + hostBefore);
@@ -286,7 +433,8 @@ namespace AutonautsCoop
             }
         }
         static void SkipLoadCeremony() { }
-        static bool AwaitingRejoin() => SaveReloadPhase > 0 || (reloadedAt > 0 && UnityEngine.Time.realtimeSinceStartup - reloadedAt < 240f && !JoinedPeer());
+        static float expectRejoinUntil; static int playersAtPark = -1;
+        static bool AwaitingRejoin() => SaveReloadPhase > 0 || (((reloadedAt > 0 && UnityEngine.Time.realtimeSinceStartup - reloadedAt < 240f) || UnityEngine.Time.realtimeSinceStartup < expectRejoinUntil) && !JoinedPeer());
         static bool JoinedPeer() { lock (Coop.I.Host.Peers) return Coop.I.Host.Peers.Exists(p => p.Alive && p.Name != "?"); }
 
         public static bool HostActRequested;
@@ -573,7 +721,7 @@ namespace AutonautsCoop
                 bool ok = GameStateManager.Instance.GetActualState() == GameStateManager.State.TeachWorker;
                 if (!ok && el < 5f) return false;
                 TestBot.Assert("client: in teach mode", ok);
-                BotState = null; var n = new JSONObject(); n["a"] = "test_botstate"; n["w"] = botUid; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+                AskBot();
                 return true;
             });
             s.Add(el =>
@@ -602,8 +750,8 @@ namespace AutonautsCoop
                 if (el < 3f) return false;
                 if (UnityEngine.Time.realtimeSinceStartup > nextBotQuery)
                 {
-                    nextBotQuery = UnityEngine.Time.realtimeSinceStartup + 2f; BotState = null;
-                    var n = new JSONObject(); n["a"] = "test_botstate"; n["w"] = botUid; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+                    nextBotQuery = UnityEngine.Time.realtimeSinceStartup + 2f;
+                    AskBot();
                 }
                 bool ok = BotState != null && BotState["n"].AsInt >= 1 && (BotState["running"].AsBool || BotState["started"].AsBool || BotState["carry"].AsInt > 0) && !BotState["learning"].AsBool;
                 if (ok) lastGood = BotState;
@@ -892,13 +1040,408 @@ namespace AutonautsCoop
                 foreach (var kv in Sync.RecreatedByType) Plugin.Log("[test]   recreated " + kv.Key + " x" + kv.Value);
                 return true;
             });
+            // 16. game speed: the host decides, the joiner follows and can't change it
+            s.Add(el => { HostReq("test_speed", n => n["fast"] = true); return true; });
+            s.Add(el =>
+            {
+                bool ok = TimeManager.Instance.GetIsFastTime();
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: game speed follows the host (fast)", ok, "x" + TimeManager.Instance.m_TimeScale);
+                TimeManager.Instance.ToggleFastTime();     // joiner tries to slow it down
+                TimeManager.Instance.SetTimeScale(1f);
+                TestBot.Assert("client: joiner can't change the game speed locally", TimeManager.Instance.GetIsFastTime(), "x" + TimeManager.Instance.m_TimeScale);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "speed", -1, x => x["s"].AsFloat > 1.5f, 8f);
+                if (r == null) return false;
+                TestBot.Assert("host: still fast after the joiner tried to change it", r == true, Reply?.ToString());
+                HostReq("test_speed", n => n["fast"] = false); return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = !TimeManager.Instance.GetIsFastTime() && Mathf.Abs(TimeManager.Instance.m_TimeScale - 1f) < 0.01f;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: back to normal speed with the host", ok, "x" + TimeManager.Instance.m_TimeScale);
+                HostReq("test_pause", n => n["on"] = true); return true;
+            });
+            s.Add(el =>
+            {
+                if (!Speed.HostPaused && el < 10f) return false;
+                TestBot.Assert("client: sees that the host paused", Speed.HostPaused);
+                HostReq("test_pause", n => n["on"] = false); return true;
+            });
+            s.Add(el =>
+            {
+                if (Speed.HostPaused && el < 10f) return false;
+                TestBot.Assert("client: sees the host unpause", !Speed.HostPaused);
+                return true;
+            });
+            // 17. bot server: open it by engaging, upload the bot's script (links it), rename it, add a folder
+            s.Add(el => { builtUid = -1; Reply = null; HostReq("test_build", n => n["t"] = "BotServer"); return true; });
+            s.Add(el =>
+            {
+                if (Got("built") && builtUid < 0) builtUid = Reply["b"].AsInt;
+                var b = Obj(builtUid);
+                if (!b && el < 15f) return false;
+                TestBot.Assert("client: host-built bot server visible", b != null);
+                if (b) Click(b.GetComponent<Building>().GetAccessPosition(), b, AFO.AT.Primary);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var sel = Library.Open();
+                if (!sel && el < 40f) return false;
+                TestBot.Assert("client: bot server screen opened on the joiner", sel != null);
+                if (!sel) return true;
+                foldersBefore = WorkerScriptManager.Instance.m_Folders.Count;
+                var bot = Obj(botUid)?.GetComponent<Worker>();
+                if (!bot) { TestBot.Assert("client: bot for the bot server test", false); return true; }
+                sel.SetTarget(bot);
+                int before = WorkerScriptManager.Instance.m_Scripts.Count;
+                sel.OnUploadClicked(null);                // exactly what the Upload button does
+                var added = WorkerScriptManager.Instance.m_Scripts.Count > before ? WorkerScriptManager.Instance.m_Scripts[WorkerScriptManager.Instance.m_Scripts.Count - 1] : null;
+                if (added != null) { added.m_Name = "CoopTestScript"; newScriptUid = added.m_UID; }   // what the name field writes
+                sel.OnNewFolderClicked(null);
+                Plugin.Log("[test] uploaded script " + newScriptUid + ", folders " + foldersBefore + " -> " + WorkerScriptManager.Instance.m_Folders.Count);
+                return true;
+            });
+            s.Add(el => { if (el < 1.5f) return false; GameStateManager.Instance.PopState(); return true; });
+            s.Add(el =>
+            {
+                var r = Poll(el, "lib", botUid, x => HasName(x["names"], "CoopTestScript#" + newScriptUid) && x["folders"].AsInt == foldersBefore + 1 && x["link"].AsInt == newScriptUid && !x["engaged"].AsBool);
+                if (r == null) return false;
+                TestBot.Assert("host: joiner's uploaded script, rename, new folder and link reached the host", r == true, Reply?.ToString());
+                HostReq("test_hostscript"); return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = false; foreach (var sc in WorkerScriptManager.Instance.m_Scripts) if (sc.m_Name == "HostScript") ok = true;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: script the host stored shows in the joiner's library", ok);
+                return true;
+            });
+            // delete the joiner's script from the bot server (no building needed: the bot database hotkey path)
+            s.Add(el =>
+            {
+                var bot = Obj(botUid)?.GetComponent<Worker>();
+                if (BotServer.m_FirstBotServer == null || !bot) { TestBot.Assert("client: bot server for delete", false); return true; }
+                GameStateManager.Instance.SetState(GameStateManager.State.Normal);
+                GameStateManager.Instance.StartSelectBuilding(BotServer.m_FirstBotServer, ObjectType.BotServer);
+                GameStateManager.Instance.GetCurrentState().GetComponent<GameStateBuildingSelect>().m_Menu.GetComponent<BotServerSelectLayout>().SetTarget(bot);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var sel = Library.Open();
+                if (!sel && el < 10f) return false;
+                if (!sel) { TestBot.Assert("client: bot database opened", false); return true; }
+                if (el < 1f) return false;
+                StoredScript sc = null; foreach (var x in WorkerScriptManager.Instance.m_Scripts) if (x.m_UID == newScriptUid) sc = x;
+                var row = sc != null ? sel.GetStoredFromObject(sc) : null;
+                if (row) sel.Delete(row);
+                Plugin.Log("[test] deleted script " + newScriptUid + " row " + (row != null));
+                return true;
+            });
+            s.Add(el => { if (el < 1.5f) return false; GameStateManager.Instance.PopState(); return true; });
+            s.Add(el =>
+            {
+                var r = Poll(el, "lib", botUid, x => !HasName(x["names"], "CoopTestScript#") && x["link"].AsInt == -1);
+                if (r == null) return false;
+                TestBot.Assert("host: joiner deleted the script and the bot was unlinked", r == true, Reply?.ToString());
+                return true;
+            });
+            // 18. catapult: engage, aim, confirm -> the host's catapult gets the target
+            s.Add(el => { builtUid = -1; Reply = null; HostReq("test_build", n => n["t"] = "Catapult"); return true; });
+            s.Add(el =>
+            {
+                if (Got("built") && builtUid < 0) builtUid = Reply["b"].AsInt;
+                var b = Obj(builtUid);
+                if (!b && el < 15f) return false;
+                TestBot.Assert("client: host-built catapult visible", b != null);
+                if (b) Click(b.GetComponent<Building>().GetAccessPosition(), b, AFO.AT.Primary);
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool open = GameStateManager.Instance.GetActualState() == GameStateManager.State.SetTargetTile;
+                if (!open && el < 40f) return false;
+                TestBot.Assert("client: catapult aiming screen opened on the joiner", open, "state " + GameStateManager.Instance.GetActualState());
+                if (!open) return true;
+                var c = Obj(builtUid).GetComponent<Catapult>();
+                var cur = c.GetTargetTile(); bool found = false;
+                for (int r = 3; r < 12 && !found; r++)
+                    foreach (var d in new[] { new TileCoord(r, 0), new TileCoord(-r, 0), new TileCoord(0, r), new TileCoord(0, -r) })
+                    {
+                        var t = new TileCoord(c.m_TileCoord.x + d.x, c.m_TileCoord.y + d.y);
+                        if (t != cur && TileManager.Instance.GetTile(t) != null && c.GetIsTileAcceptable(t)) { catTarget = t; found = true; break; }
+                    }
+                if (!found) { TestBot.Assert("client: found a catapult target", false); return true; }
+                c.SetTargetTile(catTarget);                                       // what hovering does
+                GameStateManager.Instance.GetCurrentState().GetComponent<GameStateSetTargetTile>().Close(false);   // what the click does
+                Plugin.Log("[test] catapult aimed at " + catTarget.x + "," + catTarget.y);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "cat", builtUid, x => x["x"].AsInt == catTarget.x && x["y"].AsInt == catTarget.y && !x["engaged"].AsBool);
+                if (r == null) return false;
+                TestBot.Assert("host: catapult target set by the joiner, joiner let go", r == true, Reply?.ToString());
+                return true;
+            });
+            // 19. spaceport: engage, accept a mission, decline another
+            s.Add(el => { builtUid = -1; Reply = null; HostReq("test_build", n => n["t"] = "SpacePort"); return true; });
+            s.Add(el =>
+            {
+                if (Got("built") && builtUid < 0) builtUid = Reply["b"].AsInt;
+                var b = Obj(builtUid);
+                if (!b && el < 15f) return false;
+                TestBot.Assert("client: host-built spaceport visible", b != null);
+                if (b) Click(b.GetComponent<Building>().GetAccessPosition(), b, AFO.AT.Primary);
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool open = GameStateManager.Instance.GetActualState() == GameStateManager.State.SetSpacePort;
+                var om = OffworldMissionsManager.Instance;
+                if ((!open || om.m_RegularMissionsAvailable.Count < 2) && el < 40f) return false;
+                TestBot.Assert("client: spaceport screen opened on the joiner", open, "state " + GameStateManager.Instance.GetActualState() + " missions " + om.m_RegularMissionsAvailable.Count);
+                if (!open || om.m_RegularMissionsAvailable.Count < 2) return true;
+                missionPick = om.m_RegularMissionsAvailable[0].m_ID; missionDrop = om.m_RegularMissionsAvailable[1].m_ID;
+                om.DiscardRegularMission(om.m_RegularMissionsAvailable[1]);     // Decline -> Confirm
+                om.SelectMission(om.m_RegularMissionsAvailable[0]);              // Accept
+                GameStateManager.Instance.PopState();
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "sp", builtUid, x =>
+                {
+                    bool dropped = true; foreach (JSONNode i in x["ids"].AsArray) if (i.AsInt == missionDrop) dropped = false;
+                    return x["sel"].AsInt == missionPick && dropped && !x["engaged"].AsBool;
+                });
+                if (r == null) return false;
+                TestBot.Assert("host: joiner accepted one mission and declined another", r == true, Reply?.ToString() + " pick " + missionPick + " drop " + missionDrop);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var om = OffworldMissionsManager.Instance;
+                bool ok = om.m_SelectedMission != null && om.m_SelectedMission.m_ID == missionPick;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: accepted mission shows on the joiner", ok);
+                return true;
+            });
+            // 20. planning mode: the joiner draws and names an area, the host sees it; the host's area shows for the joiner
+            s.Add(el =>
+            {
+                GameStateManager.Instance.SetState(GameStateManager.State.Edit);
+                GameStateManager.Instance.PushState(GameStateManager.State.Planning);
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool inPlan = PlanAreas.InPlanning();
+                if (!inPlan && el < 5f) return false;
+                TestBot.Assert("client: in planning mode", inPlan, "state " + GameStateManager.Instance.GetActualState());
+                var t = Tile(Me());
+                var a = PlanningManager.Instance.NewArea(new TileCoord(t.x + 2, t.y + 2), new TileCoord(t.x + 5, t.y + 4));   // drag release
+                a.SetName("CoopPlan");                                                                                  // name field
+                return true;
+            });
+            s.Add(el => { if (el < 1f) return false; GameStateManager.Instance.SetState(GameStateManager.State.Normal); return true; });
+            s.Add(el =>
+            {
+                var r = Poll(el, "plan", -1, x => HasName(x["names"], "CoopPlan"));
+                if (r == null) return false;
+                TestBot.Assert("host: joiner's planning area reached the host", r == true, Reply?.ToString());
+                HostReq("test_hostplan"); return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = false;
+                foreach (var ar in Traverse.Create(PlanningManager.Instance).Field("m_PlanningArea").GetValue<List<PlanningArea>>()) if (ar.m_Name == "HostPlan") ok = true;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: host's planning area shows for the joiner", ok, PlanAreas.Count() + " areas");
+                return true;
+            });
+            // 21. undo in edit mode: place a blueprint, undo it; delete one, undo brings it back
+            s.Add(el => { GameStateManager.Instance.SetState(GameStateManager.State.Edit); return true; });
+            s.Add(el =>
+            {
+                if (el < 1f) return false;
+                undoTile = EmptyTile(Walkable(Tile(Me()), 3, -3));
+                BuildingManager.Instance.AddBuilding(undoTile, ObjectType.Workbench, 0, false, null, false, false, false);   // what a click does
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = BuildingAt(undoTile) != null && Build.UndoAvailable;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: placed blueprint, undo offered", ok, "building " + (BuildingAt(undoTile) != null) + " undo " + Build.UndoAvailable);
+                GameStateEdit.Instance.Undo();
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = BuildingAt(undoTile) == null;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: undo removed my blueprint (via host)", ok);
+                BuildingManager.Instance.AddBuilding(undoTile, ObjectType.Workbench, 0, false, null, false, false, false);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var b = BuildingAt(undoTile);
+                if (!b && el < 10f) return false;
+                if (b) BuildingManager.Instance.DestroyBuilding(b, true);
+                return true;
+            });
+            s.Add(el =>
+            {
+                if (BuildingAt(undoTile) != null && el < 10f) return false;
+                if (el < 1f) return false;
+                GameStateEdit.Instance.Undo();
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = BuildingAt(undoTile) != null;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: undo brought back the deleted blueprint", ok, "undos " + Build.UndoSent);
+                GameStateManager.Instance.SetState(GameStateManager.State.Normal);
+                return true;
+            });
+            // 22. bot groups: make a group, rename/recolour it, call its bots, see the host's group, delete it
+            s.Add(el =>
+            {
+                var bot = Obj(botUid)?.GetComponent<Worker>();
+                if (!bot) { TestBot.Assert("client: bot for groups", false); return true; }
+                int before = WorkerGroupManager.Instance.m_Groups.Count;
+                TabWorkers.Instance.NewGroup(new List<Worker> { bot });                 // Group button
+                var g = WorkerGroupManager.Instance.m_Groups.Count > before ? WorkerGroupManager.Instance.m_Groups[WorkerGroupManager.Instance.m_Groups.Count - 1] : null;
+                if (g != null) { g.m_Name = "CoopGroup"; g.SetColour(new Color(0.9f, 0.2f, 0.2f)); groupId = g.m_ID; }   // name field, palette
+                Plugin.Log("[test] made group " + groupId);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "grp", -1, x => HasName(x["names"], "CoopGroup#" + groupId + ":" + botUid));
+                if (r == null) return false;
+                TestBot.Assert("host: joiner's new group (name, bot) reached the host", r == true, Reply?.ToString());
+                var eg = Resources.FindObjectsOfTypeAll<EditGroup>();
+                if (eg.Length > 0 && G(groupId) != null) AccessTools.Method(typeof(EditGroup), "CallAllChildren").Invoke(eg[0], new object[] { G(groupId) });   // Call button
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "grp", -1, x => (string)x["lastcmd"] == "call", 10f);
+                if (r == null) return false;
+                TestBot.Assert("host: group Call from the joiner ran on the host", r == true, Reply?.ToString());
+                HostReq("test_hostgroup"); return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = false; foreach (var g in WorkerGroupManager.Instance.m_Groups) if (g.m_Name == "HostGroup") ok = true;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: host's new group shows for the joiner", ok);
+                var mine = G(groupId);
+                if (mine != null) TabWorkers.Instance.RemoveGroup(mine);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "grp", -1, x => !HasName(x["names"], "CoopGroup#") && HasName(x["names"], "HostGroup"));
+                if (r == null) return false;
+                TestBot.Assert("host: joiner deleted their group, host's group kept", r == true, Reply?.ToString());
+                return true;
+            });
+            // 23. bug report: one zip with my logs and the host's
+            s.Add(el => { BugReport.LastPath = null; BugReport.Begin(); return true; });
+            s.Add(el =>
+            {
+                if (BugReport.LastPath == null && el < 15f) return false;
+                bool ok = BugReport.LastPath != null && System.IO.File.Exists(BugReport.LastPath);
+                string body = ok ? System.Text.Encoding.UTF8.GetString(System.IO.File.ReadAllBytes(BugReport.LastPath)) : "";
+                ok = ok && body.Contains("info.txt") && body.Contains("coop.log") && body.Contains("host-coop.log") && body.Contains("joined the game") && !body.Contains("the host did not answer");
+                TestBot.Assert("client: bug report zip has my logs and the host's", ok, BugReport.LastPath ?? "none");
+                HostReq("test_bugreport"); Reply = null;
+                return true;
+            });
+            s.Add(el =>
+            {
+                if (!Got("bug") && el < 10f) return false;
+                TestBot.Assert("host: bug report written on the host", Got("bug") && ((string)Reply["path"]).EndsWith(".zip"), Reply?.ToString());
+                return true;
+            });
+            // 24. joiner saves: autosave is skipped, Save As writes my own copy
+            s.Add(el =>
+            {
+                autosBefore = MyFile.GetAllSaveNames(true, false).Count;
+                AccessTools.Method(typeof(SaveLoadManager), "DoAutosave").Invoke(SaveLoadManager.Instance, null);
+                int after = MyFile.GetAllSaveNames(true, false).Count;
+                TestBot.Assert("client: joiner autosave is skipped", after == autosBefore && JoinerSaves.AutosavesSkipped >= 1, autosBefore + " -> " + after);
+                bool saved = SaveLoadManager.Instance.Save("coop_joiner_copy");
+                copyPlayer = Sync.MyPlayerUID; copyObjs = Coop.ObjectCount();
+                TestBot.Assert("client: joiner can Save As a copy of the world", saved && SaveLoadManager.Instance.DoesFileExist("coop_joiner_copy"));
+                return true;
+            });
             // 15. host saves, reloads the world and hosts again; I rejoin and get my character and pockets back
             if (TestBot.Transport == "tcp")
             {
+                // leave (connection drops), the host builds where I stood; rejoin next to the host with everything
                 s.Add(el =>
                 {
                     seatUid = Sync.MyPlayerUID; seatStuff.Clear();
                     Sync.CollectUIDs(Sync.SaveObject(Me(), out _), seatUid, seatStuff); seatStuff.Sort();
+                    leaveTile = Tile(Me());
+                    HostReq("test_blockspot");
+                    Plugin.Log("[test] leaving: me " + seatUid + " at " + leaveTile.x + "," + leaveTile.y + " holding [" + string.Join(",", seatStuff.ConvertAll(x => x.ToString()).ToArray()) + "]");
+                    return true;
+                });
+                s.Add(el => { if (el < 1.5f) return false; Coop.I.Client.Host.Close(); return true; });
+                s.Add(el =>
+                {
+                    bool ok = Coop.Role == Role.Off && TestBot.AtMainMenu();
+                    if (!ok && el < 30f) return false;
+                    TestBot.Assert("client: lost connection -> menu with \"" + Session.LostMsg + "\"", ok && Session.LastDisconnect == Session.LostMsg, Session.LastDisconnect ?? "");
+                    return true;
+                });
+                s.Add(el =>
+                {
+                    if (el < 6f || UnityEngine.Time.realtimeSinceStartup < rejoinTry) return false;
+                    rejoinTry = UnityEngine.Time.realtimeSinceStartup + 3f;
+                    try { Session.LastDisconnect = null; Coop.I.StartClient(TestBot.Ip, TestBot.Port); return true; }
+                    catch (System.Exception e) { Plugin.Log("rejoin retry: " + e.Message); return false; }
+                });
+                s.Add(el =>
+                {
+                    if (Coop.Role == Role.Off) { TestBot.Assert("client: rejoined after leaving", false, Session.LastDisconnect ?? "dropped"); return true; }
+                    return Coop.I.ClientLoaded && Obj(Sync.MyPlayerUID) && el > 3f;
+                });
+                s.Add(el =>
+                {
+                    var r = Poll(el, "pk", -1, x => x["parked"].AsInt >= 1 && x["restored"].AsInt >= 1, 10f);
+                    if (r == null) return false;
+                    var now = new List<int>(); Sync.CollectUIDs(Sync.SaveObject(Me(), out _), Sync.MyPlayerUID, now); now.Sort();
+                    var host = Obj(hostUid) ?? CollectionManager.Instance.GetPlayers().Find(p => p && p.m_UniqueID != Sync.MyPlayerUID);
+                    var at = Tile(Me());
+                    TestBot.Assert("host: joiner's character left the world while away", Reply != null && Reply["players"].AsInt == 1, Reply?.ToString());
+                    TestBot.Assert("host: 'left the game' and 'joined the game' notifications", Reply != null && Reply["left"].AsBool && Reply["joined"].AsBool);
+                    TestBot.Assert("client: same character back after leaving", Sync.MyPlayerUID == seatUid);
+                    TestBot.Assert("client: hands/pockets/upgrades/clothes back after leaving", string.Join(",", now.ConvertAll(x => x.ToString()).ToArray()) == string.Join(",", seatStuff.ConvertAll(x => x.ToString()).ToArray()), "now [" + string.Join(",", now.ConvertAll(x => x.ToString()).ToArray()) + "]");
+                    TestBot.Assert("client: spot was built on -> back next to the host", Reply != null && Reply["relocated"].AsInt >= 1 && host && Dist(at, Tile(host)) <= 3 && (at.x != leaveTile.x || at.y != leaveTile.y),
+                        "at " + at.x + "," + at.y + " left " + leaveTile.x + "," + leaveTile.y + " host " + (host ? Tile(host).x + "," + Tile(host).y : "?"));
+                    relocAtLeave = Reply != null ? Reply["relocated"].AsInt : -1;
+                    return true;
+                });
+
+                s.Add(el =>
+                {
+                    seatUid = Sync.MyPlayerUID; seatStuff.Clear();
+                    Sync.CollectUIDs(Sync.SaveObject(Me(), out _), seatUid, seatStuff); seatStuff.Sort();
+                    reloadTile = Tile(Me());
                     Plugin.Log("[test] before reload: me " + seatUid + " holding [" + string.Join(",", seatStuff.ConvertAll(x => x.ToString()).ToArray()) + "]");
                     HostReq("test_savereload"); return true;
                 });
@@ -931,6 +1474,8 @@ namespace AutonautsCoop
                     TestBot.Assert("client: my pockets/hands survived the reload", string.Join(",", now.ConvertAll(x => x.ToString()).ToArray()) == string.Join(",", seatStuff.ConvertAll(x => x.ToString()).ToArray()),
                         "now [" + string.Join(",", now.ConvertAll(x => x.ToString()).ToArray()) + "]");
                     TestBot.Assert("client: no duplicate character after reload", players == 2, players + " FarmerPlayers");
+                    var at = Tile(Me());
+                    TestBot.Assert("client: back where I stood before the reload (spot was free)", at.x == reloadTile.x && at.y == reloadTile.y, "at " + at.x + "," + at.y + " was " + reloadTile.x + "," + reloadTile.y);
                     return true;
                 });
             }
@@ -940,7 +1485,27 @@ namespace AutonautsCoop
             {
                 bool ok = Coop.Role == Role.Off && TestBot.AtMainMenu() && Session.LastDisconnect != null;
                 if (!ok && el < 40f) return false;
-                TestBot.Assert("client: host left -> joiner back at the main menu with a message", ok, Session.LastDisconnect ?? "no message");
+                TestBot.Assert("client: host left -> joiner back at the main menu with \"" + Session.EndedMsg + "\"", ok && Session.LastDisconnect == Session.EndedMsg, Session.LastDisconnect ?? "no message");
+                return true;
+            });
+            // 25. load my own saved copy in single player: I play my character, nothing local leaked into it
+            s.Add(el =>
+            {
+                if (el < 3f) return false;
+                Session.LastDisconnect = null;
+                SessionManager.Instance.m_LoadFileName = "coop_joiner_copy";
+                SessionManager.Instance.LoadLevel(true, "Main");
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool ok = Coop.InGame() && GameStateManager.Instance.GetActualState() == GameStateManager.State.Normal && el > 8f;
+                if (!ok && el < 90f) return false;
+                int local = 0; foreach (var kv in Sync.Savables()) if (kv.Key && kv.Key.m_UniqueID >= Sync.LocalUidBase) local++;
+                int objs = Coop.ObjectCount();
+                TestBot.Assert("client: my saved copy loads in single player", ok);
+                TestBot.Assert("client: in my copy I play my own character", ok && Me().m_UniqueID == copyPlayer, "player0 " + (ok ? Me().m_UniqueID : -1) + " want " + copyPlayer);
+                TestBot.Assert("client: copy has the world and no joiner-local objects", ok && local == 0 && System.Math.Abs(objs - copyObjs) <= copyObjs / 50 + 5, "objects " + objs + " saved " + copyObjs + " local " + local);
                 return true;
             });
         }

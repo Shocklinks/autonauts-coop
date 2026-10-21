@@ -18,13 +18,34 @@ namespace AutonautsCoop
     {
         public static int Opened, Sent;   // stats/tests
         public static int EngagedUid = -1;   // joiner: building whose menu/screen is open
+        static int closedUid = -1, sentAtClose; static float closedAt;
+        public static bool Disengaged;      // a disengage went out since the last open
+
+        public static SpacePort EngagedSpacePort()
+        {
+            if (EngagedUid < 0) return null;
+            var o = ObjectTypeList.Instance.GetObjectFromUniqueID(EngagedUid, false);
+            return o ? o.GetComponent<SpacePort>() : null;
+        }
 
         /// Joiner: sync may rebuild the building behind an open menu; the new copy needs my player as engager again
         /// (menus call m_Engager.SendAction on close).
         public static void KeepEngager()
         {
-            if (EngagedUid < 0 || Coop.Role != Role.Client) return;
-            if (!MenuOpen()) { EngagedUid = -1; return; }
+            if (Coop.Role != Role.Client) return;
+            if (closedUid >= 0 && Time.realtimeSinceStartup > closedAt + 0.3f)
+            {
+                // The screen closed but its own disengage never left (its building was rebuilt by sync meanwhile).
+                if (Sent == sentAtClose && !Disengaged)
+                {
+                    var n = new JSONObject(); n["a"] = "menu_act"; n["A"] = ActionType.DisengageObject.ToString(); n["V1"] = ""; n["V2"] = ""; n["O"] = closedUid;
+                    Sent++; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+                    Plugin.Log("screen closed without a disengage; sent one for " + closedUid);
+                }
+                closedUid = -1;
+            }
+            if (EngagedUid < 0) return;
+            if (!MenuOpen()) { closedUid = EngagedUid; closedAt = Time.realtimeSinceStartup; sentAtClose = Sent; EngagedUid = -1; return; }
             var o = ObjectTypeList.Instance.GetObjectFromUniqueID(EngagedUid, false);
             var me = ObjectTypeList.Instance.GetObjectFromUniqueID(Sync.MyPlayerUID, false);
             if (o && me && !o.GetComponent<Actionable>().m_Engager) o.GetComponent<Actionable>().m_Engager = me.GetComponent<Actionable>();
@@ -57,7 +78,7 @@ namespace AutonautsCoop
             var b = o ? o.GetComponent<Actionable>() : null;
             if (!b || !me) { Plugin.Log("menu open: building or player missing"); return; }
             b.m_Engager = me.GetComponent<Actionable>();   // menus talk to m_Engager
-            EngagedUid = b.m_UniqueID;
+            EngagedUid = b.m_UniqueID; Disengaged = false; closedUid = -1;
             Opened++;
             Sync.Applying = true;   // the open itself is host-driven, nothing to forward
             try
@@ -66,6 +87,8 @@ namespace AutonautsCoop
                 if (kind == "sign") GameStateManager.Instance.StartRenameSign(b.GetComponent<Sign>());
                 else if (kind == "wardrobe") GameStateManager.Instance.StartWardrobe(b.GetComponent<Wardrobe>());
                 else if (kind == "aquarium") GameStateManager.Instance.StartAquarium(b.GetComponent<Aquarium>());
+                else if (kind == "catapult") GameStateManager.Instance.StartCatapult(b.GetComponent<Catapult>());
+                else if (kind == "spaceport") GameStateManager.Instance.StartSpacePort(b.GetComponent<SpacePort>());
                 else if (kind == "hostonly")
                 {
                     b.m_Engager = null;
@@ -99,6 +122,30 @@ namespace AutonautsCoop
                 case "animal_stop": o.GetComponent<AnimalStation>()?.StopAll(); break;
                 case "storage_lock": o.GetComponent<Storage>()?.ToggleLock(); break;
                 case "upgrade": o.GetComponent<Building>()?.BeginUpgrade(); break;
+                case "catapult_target":
+                {
+                    var c = o.GetComponent<Catapult>();
+                    var t = new TileCoord(n["x"].AsInt, n["y"].AsInt);
+                    if (!c || !c.GetIsTileAcceptable(t)) { Plugin.Log("catapult target refused"); return true; }
+                    c.SetTargetTile(t);
+                    break;
+                }
+                case "mission_select":
+                case "mission_discard":
+                {
+                    if (!o.GetComponent<SpacePort>()) return true;
+                    var om = OffworldMissionsManager.Instance;
+                    OffworldMission m = null;
+                    if (n["id"].AsInt >= 0)
+                    {
+                        if (n["daily"].AsBool) m = om.m_DailyMissionAvailable != null && om.m_DailyMissionAvailable.m_ID == n["id"].AsInt ? om.m_DailyMissionAvailable : null;
+                        else foreach (var x in om.m_RegularMissionsAvailable) if (x != null && x.m_ID == n["id"].AsInt) m = x;
+                        if (m == null) { Plugin.Log("mission " + n["id"].AsInt + " not found"); return true; }
+                    }
+                    if ((string)n["m"] == "mission_select") om.SelectMission(m);
+                    else if (m != null && !m.m_Daily) om.DiscardRegularMission(m);
+                    break;
+                }
                 case "sign":
                 {
                     var s = o.GetComponent<Sign>();
@@ -141,7 +188,8 @@ namespace AutonautsCoop
         {
             if (!GameStateManager.Instance) return false;
             var st = GameStateManager.Instance.GetActualState();
-            return st == GameStateManager.State.BuildingSelect || st == GameStateManager.State.EditArea || st == GameStateManager.State.Inventory;
+            return st == GameStateManager.State.BuildingSelect || st == GameStateManager.State.EditArea || st == GameStateManager.State.Inventory
+                || st == GameStateManager.State.SetTargetTile || st == GameStateManager.State.SetSpacePort;
         }
     }
 
@@ -211,12 +259,14 @@ namespace AutonautsCoop
     {
         static void Prefix(FarmerPlayer __instance, ActionInfo Info)
         {
-            bool wardrobeClose = Info.m_Action == ActionType.DisengageObject && Info.m_Object && (Info.m_Object.m_TypeIdentifier == ObjectType.Wardrobe || Aquarium.GetIsTypeAquiarium(Info.m_Object.m_TypeIdentifier));
+            bool wardrobeClose = Info.m_Action == ActionType.DisengageObject && Info.m_Object && (Info.m_Object.m_TypeIdentifier == ObjectType.Wardrobe || Aquarium.GetIsTypeAquiarium(Info.m_Object.m_TypeIdentifier)
+                || Info.m_Object.GetComponent<Catapult>() || Info.m_Object.GetComponent<SpacePort>());
             if (!Build.Intercept || Keys.InKeys || __instance.m_UniqueID != Sync.MyPlayerUID || (!Menus.MenuOpen() && !wardrobeClose)) return;
             if (Info.m_Action != ActionType.SetValue && Info.m_Action != ActionType.DisengageObject) return;
             var n = new JSONObject(); n["a"] = "menu_act";
             n["A"] = Info.m_Action.ToString(); n["V1"] = Info.m_Value ?? ""; n["V2"] = Info.m_Value2 ?? "";
             n["O"] = Info.m_Object ? Info.m_Object.m_UniqueID : -1;
+            if (Info.m_Action == ActionType.DisengageObject) Menus.Disengaged = true;
             Menus.Sent++; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
         }
     }
@@ -262,10 +312,10 @@ namespace AutonautsCoop
     static class P_HostAquarium { static bool Prefix(Aquarium NewAquarium) { return !Menus.HostRedirect(NewAquarium, NewAquarium ? NewAquarium.m_TypeIdentifier : ObjectType.Aquarium, "aquarium"); } }
 
     [HarmonyPatch(typeof(GameStateManager), nameof(GameStateManager.StartCatapult))]
-    static class P_HostCatapult { static bool Prefix(Catapult NewCatapult) { return !Menus.HostOnly(NewCatapult); } }
+    static class P_HostCatapult { static bool Prefix(Catapult NewCatapult) { return !Menus.HostRedirect(NewCatapult, ObjectType.Nothing, "catapult"); } }
 
     [HarmonyPatch(typeof(GameStateManager), nameof(GameStateManager.StartSpacePort))]
-    static class P_HostSpacePort { static bool Prefix(SpacePort NewSpacePort) { return !Menus.HostOnly(NewSpacePort); } }
+    static class P_HostSpacePort { static bool Prefix(SpacePort NewSpacePort) { return !Menus.HostRedirect(NewSpacePort, ObjectType.Nothing, "spaceport"); } }
 
     [HarmonyPatch(typeof(GameStateManager), nameof(GameStateManager.GetActualState))]
     static class P_ForceNormal { static bool Prefix(ref GameStateManager.State __result) { if (!Menus.ForceNormal) return true; __result = GameStateManager.State.Normal; return false; } }
@@ -302,6 +352,59 @@ namespace AutonautsCoop
             if (Menus.Sent != __state) return;
             var n = new JSONObject(); n["a"] = "menu_act"; n["A"] = ActionType.DisengageObject.ToString(); n["V1"] = ""; n["V2"] = ""; n["O"] = uid;
             Menus.Sent++; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+        }
+    }
+
+    // ---------- joiner: catapult aiming and spaceport missions ----------
+    [HarmonyPatch(typeof(GameStateSetTargetTile), nameof(GameStateSetTargetTile.Close))]
+    static class P_CatapultClose
+    {
+        static void Prefix(GameStateSetTargetTile __instance, bool Restore)
+        {
+            if (!Build.Intercept) return;
+            var c = Traverse.Create(__instance).Field("m_Catapult").GetValue<Catapult>();
+            if (!c) return;
+            if (!c.m_Engager) { var me = ObjectTypeList.Instance.GetObjectFromUniqueID(Sync.MyPlayerUID, false); if (me) c.m_Engager = me.GetComponent<Actionable>(); }
+            Menus.EngagedUid = -1;
+            closing = c.m_UniqueID;
+            if (Restore) return;
+            var t = c.GetTargetTile();
+            Menus.Send("catapult_target", c, n => { n["x"] = t.x; n["y"] = t.y; });
+        }
+        static int closing = -1;
+        static void Postfix()
+        {
+            // Close's own disengage goes through my player; if that didn't reach the host, say it here
+            if (closing < 0 || Menus.Disengaged) { closing = -1; return; }
+            var n = new JSONObject(); n["a"] = "menu_act"; n["A"] = ActionType.DisengageObject.ToString(); n["V1"] = ""; n["V2"] = ""; n["O"] = closing;
+            Menus.Disengaged = true; Menus.Sent++; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+            closing = -1;
+        }
+    }
+
+    [HarmonyPatch(typeof(OffworldMissionsManager), nameof(OffworldMissionsManager.SelectMission))]
+    static class P_MissionSelect
+    {
+        static bool Prefix(OffworldMission NewMission)
+        {
+            if (!Build.Intercept) return true;
+            var sp = Menus.EngagedSpacePort();
+            if (!sp) return true;
+            Menus.Send("mission_select", sp, n => { n["id"] = NewMission != null ? NewMission.m_ID : -1; n["daily"] = NewMission != null && NewMission.m_Daily; });
+            return false;   // the host picks it; the mission list comes back as a world section
+        }
+    }
+
+    [HarmonyPatch(typeof(OffworldMissionsManager), nameof(OffworldMissionsManager.DiscardRegularMission))]
+    static class P_MissionDiscard
+    {
+        static bool Prefix(OffworldMission NewMission)
+        {
+            if (!Build.Intercept) return true;
+            var sp = Menus.EngagedSpacePort();
+            if (!sp || NewMission == null) return true;
+            Menus.Send("mission_discard", sp, n => { n["id"] = NewMission.m_ID; n["daily"] = NewMission.m_Daily; });
+            return false;   // the replacement mission is random: only the host makes it
         }
     }
 }

@@ -3,7 +3,8 @@
 //
 // The joiner's edit mode runs normally (palette, cursor, previews, rotation). At the points where it
 // would change the world, the request goes to the host instead and nothing happens locally; the
-// result comes back through normal sync. Undo is disabled for joiners (the host owns history).
+// result comes back through normal sync. Undo: the host remembers each joiner's last edit and reverts it on request.
+using System;
 using System.Collections.Generic;
 using HarmonyLib;
 using SimpleJSON;
@@ -14,7 +15,23 @@ namespace AutonautsCoop
     public static class Build
     {
         public static bool Intercept => Coop.Role == Role.Client && Coop.I.ClientLoaded && !Sync.Applying;
-        public static int Sent;   // stats / tests
+        public static int Sent, UndoSent;   // stats / tests
+        public static bool UndoAvailable;
+
+        /// Joiner: host says whether it holds an undo step for me; show it on the edit palette.
+        public static void SetUndoAvailable(bool on)
+        {
+            UndoAvailable = on;
+            var ed = GameStateEdit.Instance;
+            if (ed == null) return;
+            try
+            {
+                var f = AccessTools.Field(typeof(GameStateEdit), "m_UndoAction");
+                f.SetValue(ed, Enum.ToObject(f.FieldType, on ? 0 : 3));   // UndoAction.Add / UndoAction.Total
+                AccessTools.Method(typeof(GameStateEdit), "UpdateButtons").Invoke(ed, null);
+            }
+            catch (Exception e) { Plugin.Log("undo button: " + e.Message); }
+        }
 
         static void Send(JSONObject n) { Sent++; Coop.I.Client.Host.Send(Msg.Input, n.ToString()); }
         static string TypeName(ObjectType t) => ObjectTypeList.Instance.GetSaveNameFromIdentifier(t);
@@ -59,10 +76,83 @@ namespace AutonautsCoop
         }
 
         // ---------- host: apply ----------
-        public static bool HostApply(string a, JSONNode n)
+        // ---------- host: per-joiner undo (one step, like the game's own) ----------
+        class UndoRec
+        {
+            public string Kind;                                     // add | delete | move
+            public List<int> Added = new List<int>();
+            public List<int[]> Deleted = new List<int[]>();         // type, x, y, rot, flip
+            public List<int[]> Moved = new List<int[]>();           // uid, old x, old y, old rot, old flip
+            public float At;
+        }
+        static readonly Dictionary<Peer, UndoRec> undo = new Dictionary<Peer, UndoRec>();
+        public static int Undone;   // stats/tests
+
+        static UndoRec Rec(Peer p, string kind, bool extend = false)
+        {
+            if (p == null) return new UndoRec();
+            // one area delete arrives as several messages: keep them as one step
+            if (extend && undo.TryGetValue(p, out var r0) && r0.Kind == kind && Time.realtimeSinceStartup - r0.At < 0.5f) { r0.At = Time.realtimeSinceStartup; return r0; }
+            var r = new UndoRec { Kind = kind, At = Time.realtimeSinceStartup };
+            undo[p] = r; return r;
+        }
+
+        static void TellUndo(Peer p)
+        {
+            if (p == null) return;
+            var n = new JSONObject(); n["undo"] = undo.ContainsKey(p); p.Send(Msg.Info, n.ToString());
+        }
+
+        static void HostUndo(Peer p)
+        {
+            if (!undo.TryGetValue(p, out var r)) return;
+            undo.Remove(p);
+            int done = 0;
+            switch (r.Kind)
+            {
+                case "add":
+                    foreach (var uid in r.Added)
+                    {
+                        var o = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
+                        var b = o ? o.GetComponent<Building>() : null;
+                        if (!b || !(bool)b.GetActionInfo(new GetActionInfo(GetAction.IsDeletable))) continue;
+                        BuildingManager.Instance.DestroyBuilding(b, true); done++;
+                    }
+                    break;
+                case "delete":
+                    // deleted buildings come back as blueprints (no free resources)
+                    foreach (var d in r.Deleted)
+                        if (BuildingManager.Instance.AddBuilding(new TileCoord(d[1], d[2]), (ObjectType)d[0], d[3], d[4] == 1, null, false, false, false)) done++;
+                    break;
+                case "move":
+                {
+                    var list = new List<MovingBuilding>(); int i = 0;
+                    foreach (var m in r.Moved)
+                    {
+                        var o = ObjectTypeList.Instance.GetObjectFromUniqueID(m[0], false);
+                        var b = o ? o.GetComponent<Building>() : null;
+                        if (b) list.Add(new MovingBuilding(i++, b, new TileCoord(m[1], m[2]), m[3], m[4] == 1));
+                    }
+                    if (list.Count > 0) { BuildingManager.Instance.MoveBuildings(list); done = list.Count; }
+                    break;
+                }
+            }
+            Undone++;
+            Plugin.Log("joiner undo " + r.Kind + ": " + done + " building(s)");
+        }
+
+        public static bool HostApply(string a, JSONNode n, Peer from = null)
+        {
+            bool r = HostApplyInner(a, n, from);
+            if (r && from != null && (a == "build" || a == "unbuild" || a == "move" || a == "drag" || a == "undo")) TellUndo(from);
+            return r;
+        }
+
+        static bool HostApplyInner(string a, JSONNode n, Peer from)
         {
             switch (a)
             {
+                case "undo": HostUndo(from); return true;
                 case "build":
                 {
                     var type = TypeOf(n["type"]);
@@ -72,7 +162,7 @@ namespace AutonautsCoop
                     if (TileManager.Instance.GetTile(t) == null) return true;
                     var b = BuildingManager.Instance.AddBuilding(t, type, n["rot"].AsInt, n["flip"].AsBool, origObj ? origObj.GetComponent<Building>() : null,
                                                                  n["inst"].AsBool, n["force"].AsBool, n["upg"].AsBool);
-                    if (b) QuestManager.Instance.AddEvent(QuestEvent.Type.AddBlueprint, Bot: false, type, null);
+                    if (b) { QuestManager.Instance.AddEvent(QuestEvent.Type.AddBlueprint, Bot: false, type, null); Rec(from, "add").Added.Add(b.m_UniqueID); }
                     Plugin.Log("joiner placed " + n["type"] + " at " + t.x + "," + t.y + (b ? " uid " + b.m_UniqueID : " (refused)"));
                     return true;
                 }
@@ -82,6 +172,8 @@ namespace AutonautsCoop
                     var b = o ? o.GetComponent<Building>() : null;
                     if (!b || !b.GetIsSavable()) return true;
                     if (!(bool)b.GetActionInfo(new GetActionInfo(GetAction.IsDeletable))) { Plugin.Log("unbuild refused: not deletable " + b.m_UniqueID); return true; }
+                    var keep = b.GetComponent<ConverterFoundation>() && b.GetComponent<ConverterFoundation>().m_NewBuilding ? b.GetComponent<ConverterFoundation>().m_NewBuilding.m_TypeIdentifier : b.m_TypeIdentifier;
+                    Rec(from, "delete", true).Deleted.Add(new[] { (int)keep, b.m_TileCoord.x, b.m_TileCoord.y, b.m_Rotation, b.m_Flipped ? 1 : 0 });
                     b.PlayerDeleted();
                     BuildingManager.Instance.DestroyBuilding(b, n["ret"].AsBool);
                     Plugin.Log("joiner deleted " + b.m_TypeIdentifier + " " + b.m_UniqueID);
@@ -91,11 +183,13 @@ namespace AutonautsCoop
                 {
                     var list = new List<MovingBuilding>();
                     int i = 0;
+                    var rec = Rec(from, "move");
                     foreach (JSONNode e in n["m"].AsArray)
                     {
                         var o = ObjectTypeList.Instance.GetObjectFromUniqueID(e[0].AsInt, false);
                         var b = o ? o.GetComponent<Building>() : null;
                         if (!b) continue;
+                        rec.Moved.Add(new[] { b.m_UniqueID, b.m_TileCoord.x, b.m_TileCoord.y, b.m_Rotation, b.m_Flipped ? 1 : 0 });
                         list.Add(new MovingBuilding(i++, b, new TileCoord(e[1].AsInt, e[2].AsInt), e[3].AsInt, e[4].AsInt == 1));
                     }
                     if (list.Count > 0) BuildingManager.Instance.MoveBuildings(list);
@@ -108,6 +202,7 @@ namespace AutonautsCoop
                     if (type == ObjectTypeList.m_Total) return true;
                     bool isFloor = Floor.GetIsTypeFloor(type);
                     int placed = 0;
+                    var drec = Rec(from, "add");
                     foreach (JSONNode e in n["t"].AsArray)
                     {
                         var t = new TileCoord(e[0].AsInt, e[1].AsInt);
@@ -117,7 +212,7 @@ namespace AutonautsCoop
                         if (tile.m_Building && !isFloor && tile.m_Building.m_NumLevels == tile.m_Building.m_MaxLevels) continue;
                         if (tile.m_Floor && isFloor) continue;
                         var b = BuildingManager.Instance.AddBuilding(t, type, e[2].AsInt, false, null, false, n["force"].AsBool);
-                        if (b) placed++;
+                        if (b) { placed++; drec.Added.Add(b.m_UniqueID); }
                     }
                     if (placed > 0) QuestManager.Instance.AddEvent(QuestEvent.Type.AddBlueprint, Bot: false, type, null);
                     Plugin.Log("joiner drag-placed " + placed + " " + n["type"]);
@@ -194,16 +289,31 @@ namespace AutonautsCoop
         }
     }
 
-    // Joiners have no undo: their changes happen on the host. (UndoAction is a private enum, so match by name.)
+    // Joiner: the game's own undo history is local and meaningless here (nothing happened locally).
     [HarmonyPatch]
     static class P_NoUndo
     {
         static IEnumerable<System.Reflection.MethodBase> TargetMethods()
         {
             foreach (var m in AccessTools.GetDeclaredMethods(typeof(GameStateEdit)))
-                if (m.Name == "AddUndoAction" || m.Name == "Undo") yield return m;
+                if (m.Name == "AddUndoAction") yield return m;
         }
         static bool Prefix() { return Coop.Role != Role.Client; }
+    }
+
+    // Joiner: Undo (button or key) asks the host to revert my last edit.
+    [HarmonyPatch(typeof(GameStateEdit), nameof(GameStateEdit.Undo))]
+    static class P_ClientUndo
+    {
+        static bool Prefix()
+        {
+            if (Coop.Role != Role.Client) return true;
+            if (!Build.Intercept) return false;
+            var n = new JSONObject(); n["a"] = "undo"; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+            Build.UndoSent++;
+            Build.SetUndoAvailable(false);
+            return false;
+        }
     }
 
 }

@@ -140,6 +140,7 @@ namespace AutonautsCoop
 
         public override void Send(Msg t, byte[] data)
         {
+            System.Threading.Interlocked.Add(ref BytesSent, data.Length + 1);
             if (!Alive) return;
             // frame = type + payload, cut into pieces: [hdr][<=Chunk bytes]
             int total = data.Length + 1, off = 0;

@@ -165,7 +165,8 @@ namespace AutonautsCoop
         {
             var bar = s.m_Parent;
             // the holder may have just been rebuilt by sync (destroyed copy); use the UID the bar was bound to
-            into[prefix + "h"] = bar.m_Object ? bar.m_Object.m_UniqueID : UiRebind.BoundUid(bar);
+            // (a rebuilt copy may also be a pooled object whose UID is already -1)
+            into[prefix + "h"] = bar.m_Object && bar.m_Object.m_UniqueID != -1 ? bar.m_Object.m_UniqueID : UiRebind.BoundUid(bar);
             into[prefix + "t"] = (int)s.m_Type;
             int idx = -1;
             if (bar.m_CarrySlots != null && bar.m_CarrySlots.m_Buttons.Contains(s)) idx = bar.m_CarrySlots.m_Buttons.IndexOf(s);
@@ -180,6 +181,7 @@ namespace AutonautsCoop
         {
             var n = new JSONObject(); n["a"] = "inv_move";
             Describe(from, n, "s"); Describe(to, n, "d");
+            Sync.MarkRecent(n["sh"].AsInt); Sync.MarkRecent(n["dh"].AsInt);   // in flight: don't let a digest rebuild them now
             Sent++; Coop.I.Client.Host.Send(Msg.Input, n.ToString());
         }
 
@@ -398,7 +400,7 @@ namespace AutonautsCoop
     public static class UiRebind
     {
         static readonly Dictionary<InventoryBar, int> bound = new Dictionary<InventoryBar, int>();
-        public static void Bound(InventoryBar bar, BaseClass o) { if (bar && o) bound[bar] = o.m_UniqueID; }
+        public static void Bound(InventoryBar bar, BaseClass o) { if (bar && o && o.m_UniqueID != -1) bound[bar] = o.m_UniqueID; }
         public static int BoundUid(InventoryBar bar) => bar && bound.TryGetValue(bar, out int u) ? u : -1;
         static float next;
 
@@ -414,7 +416,7 @@ namespace AutonautsCoop
 
             foreach (var bar in new List<InventoryBar>(bound.Keys))
             {
-                if (!bar || bar == hud || bar.m_Object) continue;
+                if (!bar || bar == hud || (bar.m_Object && bar.m_Object.m_UniqueID == bound[bar])) continue;
                 var now = ObjectTypeList.Instance.GetObjectFromUniqueID(bound[bar], false);
                 if (now) { bar.SetObject(now); if (TestBot.Active) Plugin.Log("rebind: " + bar.GetType().Name + " -> " + bound[bar]); }
             }

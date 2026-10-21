@@ -13,7 +13,7 @@ namespace AutonautsCoop
     public static class WorldState
     {
         // Sections of the save that live outside objects. Each is sent when its JSON changes.
-        static readonly string[] Sections = { "Quest", "Locked", "Resources", "DayNight", "Scripts", "WorkerGroups", "OffworldMissions", "Wardrobe" };
+        static readonly string[] Sections = { "Quest", "Locked", "Resources", "DayNight", "Scripts", "WorkerGroups", "OffworldMissions", "Wardrobe", "Planning", "Time" };
         static readonly Dictionary<string, int> sent = new Dictionary<string, int>();
         static float next;
         public static float Every = 1f;
@@ -60,6 +60,8 @@ namespace AutonautsCoop
                 case "WorkerGroups": WorkerGroupManager.Instance.Save(n); break;
                 case "OffworldMissions": OffworldMissionsManager.Instance.Save(n); break;
                 case "Wardrobe": WardrobeManager.Instance.Save(n); break;   // all wardrobes share one store
+                case "Planning": return PlanAreas.Save();
+                case "Time": return Speed.Save();
             }
             return n;
         }
@@ -126,15 +128,10 @@ namespace AutonautsCoop
                             }
                             case "Resources": ResourceManager.Instance.Load(n); break;
                             case "DayNight": DayNightManager.Instance.Load(n); break;
-                            case "Scripts":
-                                // WorkerScriptManager.Load appends; start from empty
-                                WorkerScriptManager.Instance.m_Scripts.Clear(); WorkerScriptManager.Instance.m_Folders.Clear(); WorkerScriptManager.Instance.m_Stored.Clear();
-                                WorkerScriptManager.Instance.Load(n); WorkerScriptManager.Instance.PostLoad();
-                                break;
-                            case "WorkerGroups":
-                                WorkerGroupManager.Instance.m_Groups.Clear();
-                                WorkerGroupManager.Instance.Load(n);
-                                break;
+                            case "Scripts": Shared.Scripts.ClientIncoming(n); break;   // joiners edit it too
+                            case "Planning": Shared.Planning.ClientIncoming(n); break;
+                            case "Time": Speed.ClientApply(n); break;
+                            case "WorkerGroups": Shared.WorkerGroups.ClientIncoming(n); break;
                             case "OffworldMissions": OffworldMissionsManager.Instance.Load(n); break;
                             case "Wardrobe":
                             {
@@ -175,13 +172,17 @@ namespace AutonautsCoop
         public static float LastDisconnectAt;
 
         /// Joiner: host gone (closed, crashed, timed out, or went back to its menu). Back to the main menu.
+        public const string EndedMsg = "Host has ended the lobby.";
+        public const string LostMsg = "Host has ended the lobby (connection lost).";
+
         public static void ClientLost(string why, bool verbatim = false)
         {
             Plugin.Log("lost host: " + why);
             // Closed before the world arrived: an older host (protocol 1) drops newer joiners without a word.
             if (!verbatim && Coop.PendingWorld == null && !Coop.I.ClientLoaded)
-                why += " before sending the world. The host may run a different AutonautsCoop version (you have " + Plugin.Version + ").";
-            LastDisconnect = verbatim ? why : "Disconnected from host: " + why;
+                why = "The host closed the connection before sending the world. It may run a different AutonautsCoop version (you have " + Plugin.Version + ").";
+            else if (!verbatim) why = LostMsg;
+            LastDisconnect = why;
             LastDisconnectAt = Time.realtimeSinceStartup;
             ResetAll();
             if (SceneManager.GetActiveScene().name != "MainMenu")
@@ -194,8 +195,26 @@ namespace AutonautsCoop
         public static void StopHost(string why)
         {
             Plugin.Log("stop hosting: " + why);
+            // Joiners' characters leave the world with them (stored, and saved with the world).
+            try { Persist.ParkAll(); } catch (Exception e) { Plugin.Log("park on stop: " + e); }
+            try
+            {
+                var n = new JSONObject(); n["end"] = EndedMsg;
+                Coop.I.Host?.Broadcast(Msg.Info, System.Text.Encoding.UTF8.GetBytes(n.ToString()));
+            }
+            catch { }
             try { Coop.I.Host?.Stop(); } catch { }
             ResetAll();
+        }
+
+        /// Host: tell everyone (and show it here) that a player came or went.
+        public static void Notify(string text, Peer except = null)
+        {
+            Menu.Toast(text);
+            if (Coop.Role != Role.Host || Coop.I.Host == null) return;
+            var n = new JSONObject(); n["note"] = text;
+            var d = System.Text.Encoding.UTF8.GetBytes(n.ToString());
+            lock (Coop.I.Host.Peers) foreach (var p in Coop.I.Host.Peers) if (p != except && p.Alive && p.Name != "?") p.Send(Msg.Info, d);
         }
 
         static void ResetAll()

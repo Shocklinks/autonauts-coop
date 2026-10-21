@@ -1,0 +1,418 @@
+// AutonautsCoop - Shared.cs - world state both sides can edit: the script library (bot server) and planning areas.
+// Also: game speed follows the host (joiners can't change it), and bot-server actions on bots go to the host.
+// Version 0.9.0 - 2026-10-21 - Created with Claude
+//
+// The script library and planning areas are plain manager data, not objects, and their editors change them with
+// direct calls and field writes. Instead of forwarding every small edit, the joiner watches the whole section while
+// its editor is open and sends the full section when it changes; the host replaces its copy and broadcasts it as a
+// normal world section. Last writer wins if two people edit at the same moment.
+using System;
+using System.Collections.Generic;
+using HarmonyLib;
+using SimpleJSON;
+using UnityEngine;
+
+namespace AutonautsCoop
+{
+    public class SharedSection
+    {
+        public string Name;
+        public Func<JSONNode> Save;          // current local state
+        public Action<JSONNode> Replace;     // replace local state with this
+        public Func<bool> Editing;           // local editor open: watch for changes
+        public Func<bool> Busy;              // local editor holds references: wait before replacing
+
+        // joiner
+        int baseHash, pushedHash; float pushedAt; bool wasEditing; JSONNode deferred;
+        // host
+        JSONNode queued;
+        public int Pushes, Replaces;         // stats/tests
+
+        /// Parse round trip first: a section built locally and the same section received over the wire print the same.
+        static int H(JSONNode n) => n == null ? 0 : JSON.Parse(n.ToString()).ToString().GetHashCode();
+        JSONNode held;   // host data that arrived while our own edit was in flight
+
+        public void ClientReset() { baseHash = H(Safe()); pushedHash = 0; deferred = null; held = null; wasEditing = false; }
+
+        JSONNode Safe() { try { return Save(); } catch (Exception e) { Plugin.Log("shared " + Name + " save: " + e.Message); return null; } }
+
+        /// Joiner: send our copy now if it differs from what the host last gave us.
+        public void Flush()
+        {
+            var n = Safe(); int h = H(n);
+            if (n == null || h == baseHash || h == pushedHash) return;
+            var m = new JSONObject(); m["a"] = "shared"; m["n"] = Name; m["s"] = n;
+            Coop.I.Client.Host.Send(Msg.Input, m.ToString());
+            pushedHash = h; pushedAt = Time.realtimeSinceStartup; Pushes++;
+            Plugin.Log("shared " + Name + " sent to host");
+        }
+
+        public void ClientTick()
+        {
+            bool ed = Editing();
+            if (ed || wasEditing) Flush();
+            if (held != null && (pushedHash == 0 || Time.realtimeSinceStartup - pushedAt >= 4f))
+            {
+                // our edit was never echoed back as-is: take the host's latest
+                var h = held; held = null; pushedHash = 0;
+                Sync.Applying = true;
+                try { ClientIncoming(h); } finally { Sync.Applying = false; }
+            }
+            wasEditing = ed;
+            if (deferred != null && !Busy())
+            {
+                var d = deferred; deferred = null;
+                Sync.Applying = true;
+                try { ClientIncoming(d); } finally { Sync.Applying = false; }
+            }
+        }
+
+        /// Joiner: the host's section arrived.
+        public void ClientIncoming(JSONNode n)
+        {
+            int h = H(n);
+            if (pushedHash != 0)
+            {
+                if (h == pushedHash) { pushedHash = 0; baseHash = h; held = null; return; }   // our own edit, echoed
+                if (Time.realtimeSinceStartup - pushedAt < 4f) { held = n; return; }   // maybe older than our edit: wait
+                pushedHash = 0;
+            }
+            if (Editing()) Flush();                                               // unsent local edit wins
+            if (pushedHash != 0) return;
+            if (Busy()) { deferred = n; return; }
+            Replace(n); Replaces++;
+            baseHash = H(Safe());
+        }
+
+        /// Host: a joiner sent its copy.
+        public void HostIncoming(JSONNode n)
+        {
+            if (Busy()) { queued = n; Plugin.Log("shared " + Name + " from joiner queued (host editing)"); return; }
+            Replace(n); Replaces++;
+            Plugin.Log("shared " + Name + " replaced from joiner");
+        }
+
+        public void HostTick()
+        {
+            if (queued != null && !Busy()) { var q = queued; queued = null; Replace(q); Replaces++; Plugin.Log("shared " + Name + " replaced from joiner (queued)"); }
+        }
+    }
+
+    public static class Shared
+    {
+        public static readonly SharedSection Scripts = new SharedSection
+        {
+            Name = "Scripts",
+            Save = () => { var n = new JSONObject(); WorkerScriptManager.Instance.Save(n); return n; },
+            Replace = Library.Replace,
+            Editing = () => Library.Open() != null,
+            Busy = () => { var s = Library.Open(); return s != null && s.GetIsDragging(); },
+        };
+
+        public static readonly SharedSection Planning = new SharedSection
+        {
+            Name = "Planning",
+            Save = PlanAreas.Save,
+            Replace = PlanAreas.Replace,
+            Editing = PlanAreas.InPlanning,
+            Busy = PlanAreas.InPlanning,
+        };
+
+        public static readonly SharedSection WorkerGroups = new SharedSection
+        {
+            Name = "WorkerGroups",
+            Save = Groups.Save,
+            Replace = Groups.Replace,
+            Editing = Groups.Editing,
+            Busy = Groups.Busy,
+        };
+
+        public static readonly SharedSection[] All = { Scripts, Planning, WorkerGroups };
+        public static SharedSection Get(string name) { foreach (var s in All) if (s.Name == name) return s; return null; }
+
+        static float next;
+        public static void ClientTick()
+        {
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded || Time.realtimeSinceStartup < next) return;
+            next = Time.realtimeSinceStartup + 0.25f;
+            foreach (var s in All) { try { s.ClientTick(); } catch (Exception e) { Plugin.Log("shared " + s.Name + ": " + e.Message); } }
+            Speed.ClientTick();
+        }
+
+        public static void HostTick()
+        {
+            foreach (var s in All) { try { s.HostTick(); } catch (Exception e) { Plugin.Log("shared " + s.Name + ": " + e.Message); } }
+        }
+
+        public static void OnClientLoaded() { foreach (var s in All) s.ClientReset(); }
+
+        public static bool HostApply(string a, JSONNode n, FarmerPlayer fp)
+        {
+            if (a == "shared")
+            {
+                var s = Get(n["n"]);
+                if (s == null || n["s"] == null || n["s"].IsNull) return true;
+                try { s.HostIncoming(n["s"]); } catch (Exception e) { Plugin.Log("shared " + (string)n["n"] + " apply: " + e); }
+                return true;
+            }
+            if (Groups.HostApply(a, n, fp)) return true;
+            return Library.HostApply(a, n, fp);
+        }
+    }
+
+    // ======================= script library =======================
+    public static class Library
+    {
+        public static BotServerSelect Open()
+        {
+            if (!GameStateManager.Instance || GameStateManager.Instance.GetActualState() != GameStateManager.State.BuildingSelect) return null;
+            return UnityEngine.Object.FindObjectOfType<BotServerSelect>();
+        }
+
+        /// Replace the whole library, then put back the links bots and data storages hold (they live on the bots).
+        public static void Replace(JSONNode n)
+        {
+            var wsm = WorkerScriptManager.Instance;
+            wsm.m_Scripts.Clear(); wsm.m_Folders.Clear(); wsm.m_Stored.Clear();
+            wsm.Load(n); wsm.PostLoad();
+            foreach (var kv in Sync.Savables())
+            {
+                var b = kv.Key; if (!b) continue;
+                var w = b.GetComponent<Worker>();
+                if (w && w.m_WorkerInterpreter != null && w.m_WorkerInterpreter.m_LinkedScriptUID != -1)
+                {
+                    int uid = w.m_WorkerInterpreter.m_LinkedScriptUID;
+                    if (wsm.GetScriptInstructions(uid, false) != null) wsm.LinkBotToScript(uid, w);
+                    else { w.m_WorkerInterpreter.m_LinkedScriptUID = -1; Traverse.Create(w.m_WorkerInterpreter).Field("m_LinkedHighInstructions").SetValue(null); }
+                }
+                var ds = b.GetComponent<DataStorageCrude>();
+                if (ds && ds.m_LinkedScriptUID != -1)
+                {
+                    if (wsm.GetScriptInstructions(ds.m_LinkedScriptUID, false) != null) wsm.LinkDataStorageToScript(ds.m_LinkedScriptUID, ds);
+                    else ds.m_LinkedScriptUID = -1;
+                }
+            }
+            Refresh();
+        }
+
+        /// Rebuild an open bot server list so it shows (and edits) the new entries.
+        static void Refresh()
+        {
+            var sel = Open();
+            if (!sel) return;
+            try
+            {
+                sel.ClearSelection();
+                var list = Traverse.Create(sel).Field("m_Scripts").GetValue<List<BotServerStorageBase>>();
+                if (list != null) { foreach (var e in list) if (e) UnityEngine.Object.Destroy(e.gameObject); list.Clear(); }
+                AccessTools.Method(typeof(BotServerSelect), "CreateScripts").Invoke(sel, new object[] { WorkerScriptManager.Instance.m_Stored, null });
+                sel.UpdatePositions(); sel.UpdateVisibility();
+                AccessTools.Method(typeof(BotServerSelect), "UpdateLinkButtons").Invoke(sel, null);
+            }
+            catch (Exception e) { Plugin.Log("bot server refresh: " + e.Message); }
+        }
+
+        // ---- joiner: bot-server actions that change bots or data storages (the library itself syncs as a section) ----
+        public static bool Forward => Build.Intercept && !Sync.Applying && Open() != null;
+
+        public static void Send(string a, BaseClass target, Action<JSONObject> args = null)
+        {
+            Shared.Scripts.Flush();   // the host must know a script before a bot links to it
+            var n = new JSONObject(); n["a"] = a; n["w"] = target ? target.m_UniqueID : -1;
+            args?.Invoke(n);
+            Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+            Sent++;
+        }
+        public static int Sent;
+
+        public static JSONObject SaveList(List<HighInstruction> list)
+        {
+            var hl = new HighInstructionList(); hl.m_List.AddRange(list);
+            var s = new JSONObject(); hl.Save(s); return s;
+        }
+
+        public static bool HostApply(string a, JSONNode n, FarmerPlayer fp)
+        {
+            if (!a.StartsWith("wi_") && !a.StartsWith("ds_")) return false;
+            var o = ObjectTypeList.Instance.GetObjectFromUniqueID(n["w"].AsInt, false);
+            var w = o ? o.GetComponent<Worker>() : null;
+            var ds = o ? o.GetComponent<DataStorageCrude>() : null;
+            var wsm = WorkerScriptManager.Instance;
+            int s = n["s"].AsInt;
+            switch (a)
+            {
+                case "wi_link":
+                    if (!w || wsm.GetScriptInstructions(s, false) == null) { Plugin.Log("wi_link refused: bot or script " + s + " missing"); return true; }
+                    w.m_WorkerInterpreter.LinkHighInstructions(s);
+                    break;
+                case "wi_unlink":
+                    if (!w) return true;
+                    w.m_WorkerInterpreter.UnlinkHighInstructions();
+                    break;
+                case "wi_set":
+                case "wi_add":
+                {
+                    if (!w) return true;
+                    var hl = new HighInstructionList(); hl.Load(n["l"]); hl.PostLoad();
+                    if (a == "wi_set") w.m_WorkerInterpreter.SetHighInstructions(hl.m_List, n["start"].AsBool);
+                    else w.m_WorkerInterpreter.AddHighInstructions(hl.m_List, n["start"].AsBool);
+                    break;
+                }
+                case "ds_copy":
+                    if (!ds || wsm.GetScriptInstructions(s, false) == null) return true;
+                    ds.Copy(s, n["linked"].AsBool);
+                    break;
+                case "ds_add":
+                    if (!ds || wsm.GetScriptInstructions(s, false) == null) return true;
+                    ds.Add(s);
+                    break;
+                default: return true;
+            }
+            Plugin.Log("joiner bot server " + a + " on " + (o ? o.m_TypeIdentifier + " " + o.m_UniqueID : "?") + " script " + s);
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(WorkerInterpreter), nameof(WorkerInterpreter.LinkHighInstructions))]
+    static class P_LibLink
+    {
+        static void Prefix(WorkerInterpreter __instance, int LinkedScriptUID)
+        {
+            if (!Library.Forward) return;
+            var w = Traverse.Create(__instance).Field("m_Worker").GetValue<Worker>();
+            Library.Send("wi_link", w, n => n["s"] = LinkedScriptUID);
+        }
+    }
+
+    [HarmonyPatch(typeof(WorkerInterpreter), nameof(WorkerInterpreter.UnlinkHighInstructions))]
+    static class P_LibUnlink
+    {
+        static void Prefix(WorkerInterpreter __instance)
+        {
+            // LinkHighInstructions unlinks first; that one is covered by the link message
+            if (!Library.Forward || __instance.m_LinkedScriptUID == -1 || P_LibGuard.InLink) return;
+            var w = Traverse.Create(__instance).Field("m_Worker").GetValue<Worker>();
+            Library.Send("wi_unlink", w);
+        }
+    }
+
+    [HarmonyPatch(typeof(WorkerInterpreter), nameof(WorkerInterpreter.LinkHighInstructions))]
+    static class P_LibGuard
+    {
+        public static bool InLink;
+        static void Prefix() { InLink = true; }
+        static void Finalizer() { InLink = false; }
+    }
+
+    [HarmonyPatch(typeof(WorkerInterpreter), nameof(WorkerInterpreter.SetHighInstructions))]
+    static class P_LibSet
+    {
+        static void Prefix(WorkerInterpreter __instance, List<HighInstruction> NewInstructions, bool Start)
+        {
+            if (!Library.Forward) return;
+            var w = Traverse.Create(__instance).Field("m_Worker").GetValue<Worker>();
+            Library.Send("wi_set", w, n => { n["l"] = Library.SaveList(NewInstructions); n["start"] = Start; });
+        }
+    }
+
+    [HarmonyPatch(typeof(WorkerInterpreter), nameof(WorkerInterpreter.AddHighInstructions))]
+    static class P_LibAdd
+    {
+        static void Prefix(WorkerInterpreter __instance, List<HighInstruction> NewInstructions, bool Start)
+        {
+            if (!Library.Forward) return;
+            var w = Traverse.Create(__instance).Field("m_Worker").GetValue<Worker>();
+            Library.Send("wi_add", w, n => { n["l"] = Library.SaveList(NewInstructions); n["start"] = Start; });
+        }
+    }
+
+    [HarmonyPatch(typeof(DataStorageCrude), nameof(DataStorageCrude.Copy), new[] { typeof(int), typeof(bool) })]
+    static class P_LibDsCopy
+    {
+        static void Prefix(DataStorageCrude __instance, int LinkedScriptUID, bool MakeLinked)
+        {
+            if (!Library.Forward) return;
+            Library.Send("ds_copy", __instance, n => { n["s"] = LinkedScriptUID; n["linked"] = MakeLinked; });
+        }
+    }
+
+    [HarmonyPatch(typeof(DataStorageCrude), nameof(DataStorageCrude.Add), new[] { typeof(int) })]
+    static class P_LibDsAdd
+    {
+        static void Prefix(DataStorageCrude __instance, int LinkedScriptUID)
+        {
+            if (!Library.Forward) return;
+            Library.Send("ds_add", __instance, n => n["s"] = LinkedScriptUID);
+        }
+    }
+
+    // ======================= planning areas =======================
+    public static class PlanAreas
+    {
+        public static bool InPlanning() => GameStateManager.Instance && GameStateManager.Instance.GetActualState() == GameStateManager.State.Planning;
+
+        /// Only the areas are shared; show/hide toggles stay per player.
+        public static JSONNode Save()
+        {
+            var n = new JSONObject(); PlanningManager.Instance.Save(n);
+            var o = new JSONObject(); o["Areas"] = n["Areas"]; return o;
+        }
+
+        public static void Replace(JSONNode n)
+        {
+            var pm = PlanningManager.Instance;
+            var list = Traverse.Create(pm).Field("m_PlanningArea").GetValue<List<PlanningArea>>();
+            foreach (var a in new List<PlanningArea>(list)) pm.DeleteArea(a);
+            var full = new JSONObject();
+            full["Areas"] = n["Areas"];
+            full["ShowAreas"] = pm.m_ShowAreas; full["ShowNames"] = pm.m_ShowNames; full["ShowDimensions"] = pm.m_ShowDimensions;
+            pm.Load(full);
+        }
+
+        public static int Count() => Traverse.Create(PlanningManager.Instance).Field("m_PlanningArea").GetValue<List<PlanningArea>>().Count;
+    }
+
+    // ======================= game speed =======================
+    /// The host decides the game speed; joiners follow it and can't change it.
+    public static class Speed
+    {
+        public static bool HostPaused;
+        static float lastToast;
+
+        public static JSONNode Save()
+        {
+            var n = new JSONObject();
+            n["S"] = TimeManager.Instance.m_TimeScale;
+            n["P"] = TimeManager.Instance.m_PauseScreenEnabled;
+            return n;
+        }
+
+        public static void ClientApply(JSONNode n)
+        {
+            float s = n["S"].AsFloat;
+            HostPaused = n["P"].AsBool;
+            if (Mathf.Abs(TimeManager.Instance.m_TimeScale - s) < 0.001f) return;
+            TimeManager.Instance.SetTimeScale(s);
+            bool fast = TimeManager.Instance.GetIsFastTime();
+            var hen = CollectionManager.Instance.GetCollection("StoneHenge");
+            if (hen != null) foreach (var kv in hen) try { kv.Key.GetComponent<StoneHenge>().SetActive(fast); } catch { }
+            try { var fb = HudManager.Instance.m_FastTimeButton; if (fb) AccessTools.Method(typeof(FastButton), "UpdateImage").Invoke(fb, null); } catch { }
+            Plugin.Log("game speed from host: x" + s);
+        }
+
+        public static bool Blocked()
+        {
+            if (Coop.Role != Role.Client || Sync.Applying) return false;
+            if (Time.realtimeSinceStartup - lastToast > 2f) { lastToast = Time.realtimeSinceStartup; Menu.Toast("Only the host can change the game speed"); }
+            return true;
+        }
+
+        public static void ClientTick() { }
+    }
+
+    [HarmonyPatch(typeof(TimeManager), nameof(TimeManager.ToggleFastTime))]
+    static class P_SpeedToggle { static bool Prefix() => !Speed.Blocked(); }
+
+    [HarmonyPatch(typeof(TimeManager), nameof(TimeManager.SetTimeScale))]
+    static class P_SpeedSet { static bool Prefix() => Coop.Role != Role.Client || Sync.Applying; }
+}

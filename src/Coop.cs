@@ -148,6 +148,9 @@ namespace AutonautsCoop
                     case Msg.Info:
                         var inf = JSON.Parse(Encoding.UTF8.GetString(p.Data));
                         if (inf["reject"] != null && !inf["reject"].IsNull) { Session.ClientLost((string)inf["reject"], true); return; }
+                        if (inf["end"] != null && !inf["end"].IsNull) { Session.ClientLost((string)inf["end"], true); return; }
+                        if (inf["note"] != null && !inf["note"].IsNull) { Menu.Toast(inf["note"]); break; }
+                        if (inf["hostlog"] != null && !inf["hostlog"].IsNull) { BugReport.ClientGotHostLog(inf["hostlog"]); break; }
                         if (inf["you"] != null && !inf["you"].IsNull) { Sync.MyPlayerUID = inf["you"].AsInt; Locks.MyKey = inf["key"]; Plugin.Log("my player uid " + Sync.MyPlayerUID + " key " + Locks.MyKey); }
                         else if (inf["locks"] != null && !inf["locks"].IsNull) Locks.ClientReceive(inf["locks"].AsArray);
                         else if (inf["open"] != null && !inf["open"].IsNull) Menus.ClientOpen(inf);
@@ -158,9 +161,11 @@ namespace AutonautsCoop
                         else if (inf["worldtest"] != null && !inf["worldtest"].IsNull) TestScript.WorldReply = inf["worldtest"];
                         else if (inf["tiletest"] != null && !inf["tiletest"].IsNull) TestScript.TileTest = inf["tiletest"];
                         else if (inf["chk"] != null && !inf["chk"].IsNull) TestScript.Chk = inf["chk"];
+                        else if (inf["tr"] != null && !inf["tr"].IsNull) TestScript.Reply = inf;
+                        else if (inf["undo"] != null && !inf["undo"].IsNull) Build.SetUndoAvailable(inf["undo"].AsBool);
                         else if (inf["blob"] != null && !inf["blob"].IsNull) TestScript.Blob = inf;
                         else if (inf["teach"] != null && !inf["teach"].IsNull) Teach.ClientReceive(inf["teach"].AsArray);
-                        else if (inf["botstate"] != null && !inf["botstate"].IsNull) TestScript.BotState = inf["botstate"];
+                        else if (inf["botstate"] != null && !inf["botstate"].IsNull) { var bs = inf["botstate"]; if (bs["step"] == null || bs["step"].IsNull || bs["step"].AsInt >= TestScript.askStep) TestScript.BotState = bs; }
                         else LastInfo = inf;
                         break;
                     case Msg.Delta:
@@ -182,10 +187,11 @@ namespace AutonautsCoop
             try
             {
                 SteamNet.Pump();
-                Session.Tick();
+                if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); Shared.HostTick(); }
+                else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); Shared.ClientTick(); }
+                Session.Tick();   // after the inbox: a "lobby ended" message may sit right before the close
                 VersionCheck.Tick();
-                if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); }
-                else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); }
+                BugReport.Tick();
                 Locks.Tick();
                 TestBot.Tick();
             }
@@ -221,12 +227,7 @@ namespace AutonautsCoop
         }
     }
 
-    // Clients never write saves (the host owns the world).
-    [HarmonyPatch(typeof(SaveLoadManager), nameof(SaveLoadManager.Save))]
-    static class P_NoClientSave
-    {
-        static bool Prefix(ref bool __result) { if (Coop.Role == Role.Client) { __result = false; return false; } return true; }
-    }
+    // Joiner saves: autosave/quick save are blocked in Extras.cs; Save As writes the joiner's own copy.
 
     [HarmonyPatch(typeof(SaveLoadManager), "DoAutosave")]
     static class P_NoClientAutosave
