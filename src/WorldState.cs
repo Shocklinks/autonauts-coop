@@ -13,12 +13,28 @@ namespace AutonautsCoop
     public static class WorldState
     {
         // Sections of the save that live outside objects. Each is sent when its JSON changes.
-        static readonly string[] Sections = { "Quest", "Locked", "Resources", "DayNight", "Scripts", "WorkerGroups", "OffworldMissions" };
+        static readonly string[] Sections = { "Quest", "Locked", "Resources", "DayNight", "Scripts", "WorkerGroups", "OffworldMissions", "Wardrobe" };
         static readonly Dictionary<string, int> sent = new Dictionary<string, int>();
         static float next;
         public static float Every = 1f;
         public static int Applied;   // client stats
         static JSONNode lastLocked;
+
+        /// If the joiner has the build menu open, rebuild it so new unlocks show up right away.
+        static void RefreshPalette()
+        {
+            try
+            {
+                var ed = GameStateEdit.Instance;
+                if (ed == null) return;
+                var pal = Traverse.Create(ed).Field("m_BuildingPalette").GetValue();
+                if (pal == null) return;
+                var t = Traverse.Create(pal);
+                foreach (var m in new[] { "UpdateCategories", "UpdateBuildings", "Refresh", "UpdateBuiltCounts" })
+                    if (t.Method(m).MethodExists()) { t.Method(m).GetValue(); }
+            }
+            catch (Exception e) { Plugin.Log("palette refresh: " + e.Message); }
+        }
 
         static JSONNode SaveSection(string s)
         {
@@ -33,6 +49,9 @@ namespace AutonautsCoop
                     var arr = new JSONArray();
                     foreach (var kv in QuestManager.Instance.m_ObjectsLocked) { var e = new JSONArray(); e.Add(ObjectTypeList.Instance.GetSaveNameFromIdentifier(kv.Key)); e.Add(kv.Value); arr.Add(e); }
                     n["L"] = arr;
+                    var barr = new JSONArray();   // buildings have their own lock table (the build palette uses it)
+                    foreach (var kv in QuestManager.Instance.m_BuildingsLocked) { var e = new JSONArray(); e.Add(ObjectTypeList.Instance.GetSaveNameFromIdentifier(kv.Key)); e.Add(kv.Value); barr.Add(e); }
+                    n["B"] = barr;
                     break;
                 }
                 case "Resources": ResourceManager.Instance.Save(n); break;
@@ -40,6 +59,7 @@ namespace AutonautsCoop
                 case "Scripts": WorkerScriptManager.Instance.Save(n); break;
                 case "WorkerGroups": WorkerGroupManager.Instance.Save(n); break;
                 case "OffworldMissions": OffworldMissionsManager.Instance.Save(n); break;
+                case "Wardrobe": WardrobeManager.Instance.Save(n); break;   // all wardrobes share one store
             }
             return n;
         }
@@ -92,6 +112,16 @@ namespace AutonautsCoop
                                     var t = ObjectTypeList.Instance.GetIdentifierFromSaveName(e[0], false);
                                     if (t != ObjectTypeList.m_Total && !d.ContainsKey(t)) d.Add(t, e[1].AsInt);
                                 }
+                                if (n["B"] != null && !n["B"].IsNull)
+                                {
+                                    var bd = QuestManager.Instance.m_BuildingsLocked; bd.Clear();
+                                    foreach (JSONNode e in n["B"].AsArray)
+                                    {
+                                        var t = ObjectTypeList.Instance.GetIdentifierFromSaveName(e[0], false);
+                                        if (t != ObjectTypeList.m_Total && !bd.ContainsKey(t)) bd.Add(t, e[1].AsInt);
+                                    }
+                                }
+                                RefreshPalette();
                                 break;
                             }
                             case "Resources": ResourceManager.Instance.Load(n); break;
@@ -106,6 +136,21 @@ namespace AutonautsCoop
                                 WorkerGroupManager.Instance.Load(n);
                                 break;
                             case "OffworldMissions": OffworldMissionsManager.Instance.Load(n); break;
+                            case "Wardrobe":
+                            {
+                                // Load appends and creates the clothes; drop ours first, then load like the game's loader
+                                var list = Traverse.Create(WardrobeManager.Instance).Field("m_Objects").GetValue<List<Holdable>>();
+                                foreach (var h in new List<Holdable>(list)) if (h) Sync.Destroy(h);
+                                list.Clear();
+                                foreach (JSONNode o in n["Wardrobe"].AsArray)
+                                {
+                                    var clash = ObjectTypeList.Instance.GetObjectFromUniqueID(o["UID"].AsInt, false);
+                                    if (clash) Sync.Destroy(clash);
+                                }
+                                ObjectTypeList.m_Loading = true;
+                                try { WardrobeManager.Instance.Load(n); } finally { ObjectTypeList.m_Loading = false; }
+                                break;
+                            }
                         }
                         Applied++;
                     }
@@ -130,10 +175,13 @@ namespace AutonautsCoop
         public static float LastDisconnectAt;
 
         /// Joiner: host gone (closed, crashed, timed out, or went back to its menu). Back to the main menu.
-        public static void ClientLost(string why)
+        public static void ClientLost(string why, bool verbatim = false)
         {
             Plugin.Log("lost host: " + why);
-            LastDisconnect = "Disconnected from host: " + why;
+            // Closed before the world arrived: an older host (protocol 1) drops newer joiners without a word.
+            if (!verbatim && Coop.PendingWorld == null && !Coop.I.ClientLoaded)
+                why += " before sending the world. The host may run a different AutonautsCoop version (you have " + Plugin.Version + ").";
+            LastDisconnect = verbatim ? why : "Disconnected from host: " + why;
             LastDisconnectAt = Time.realtimeSinceStartup;
             ResetAll();
             if (SceneManager.GetActiveScene().name != "MainMenu")

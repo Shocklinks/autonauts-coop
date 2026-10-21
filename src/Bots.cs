@@ -404,7 +404,9 @@ namespace AutonautsCoop
 
         public static void Tick()
         {
-            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded || Time.realtimeSinceStartup < next) return;
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded) return;
+            Menus.KeepEngager();
+            if (Time.realtimeSinceStartup < next) return;
             next = Time.realtimeSinceStartup + 0.2f;
             var hud = HudManager.Instance ? HudManager.Instance.m_InventoryBar : null;
             var me = ObjectTypeList.Instance.GetObjectFromUniqueID(Sync.MyPlayerUID, false);

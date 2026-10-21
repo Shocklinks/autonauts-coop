@@ -14,7 +14,7 @@ namespace AutonautsCoop
 
     public class Coop : MonoBehaviour
     {
-        public const int Protocol = 1;
+        public const int Protocol = 2;   // 2: hello carries the mod version; mismatches get a reason
         public static Coop I;
         public static Role Role = Role.Off;
         public static string PendingWorld;          // client: world JSON to load from memory
@@ -75,8 +75,9 @@ namespace AutonautsCoop
                 {
                     case Msg.Hello:
                         var hello = JSON.Parse(Encoding.UTF8.GetString(p.Data));
-                        if (hello["protocol"].AsInt != Protocol) { Plugin.Log("peer protocol mismatch"); p.From.Close(); break; }
-                        if (p.From.Name != "?") break;   // duplicate hello (connectionless wire)
+                        if (p.From.Name != "?" || VersionCheck.IsRefused(p.From)) break;   // duplicate hello (connectionless wire)
+                        string why = VersionCheck.Check(hello);
+                        if (why != null) { VersionCheck.Reject(p.From, (string)hello["name"], why); break; }
                         p.From.Name = hello["name"];
                         SendSnapshot(p.From);
                         break;
@@ -115,10 +116,17 @@ namespace AutonautsCoop
         {
             Role = Role.Client;
             Client = c;
+            Client.Host.Send(Msg.Hello, MakeHello().ToString());
+        }
+
+        public static JSONObject MakeHello()
+        {
             var hello = new JSONObject();
             hello["protocol"] = Protocol;
+            hello["version"] = VersionCheck.FakeVersion ?? Plugin.Version;
+            hello["game"] = SaveLoadManager.GetVersion();
             hello["name"] = SteamNet.MyName();
-            Client.Host.Send(Msg.Hello, hello.ToString());
+            return hello;
         }
 
         void ClientUpdate()
@@ -139,10 +147,13 @@ namespace AutonautsCoop
                         break;
                     case Msg.Info:
                         var inf = JSON.Parse(Encoding.UTF8.GetString(p.Data));
+                        if (inf["reject"] != null && !inf["reject"].IsNull) { Session.ClientLost((string)inf["reject"], true); return; }
                         if (inf["you"] != null && !inf["you"].IsNull) { Sync.MyPlayerUID = inf["you"].AsInt; Locks.MyKey = inf["key"]; Plugin.Log("my player uid " + Sync.MyPlayerUID + " key " + Locks.MyKey); }
                         else if (inf["locks"] != null && !inf["locks"].IsNull) Locks.ClientReceive(inf["locks"].AsArray);
                         else if (inf["open"] != null && !inf["open"].IsNull) Menus.ClientOpen(inf);
                         else if (inf["wb"] != null && !inf["wb"].IsNull) TestScript.WbUid = inf["wb"].AsInt;
+                        else if (inf["wardrobe"] != null && !inf["wardrobe"].IsNull) TestScript.WardrobeUid = inf["wardrobe"].AsInt;
+                        else if (inf["unlock"] != null && !inf["unlock"].IsNull) TestScript.UnlockReply = inf["unlock"];
                         else if (inf["conv"] != null && !inf["conv"].IsNull) TestScript.ConvState = inf["conv"];
                         else if (inf["worldtest"] != null && !inf["worldtest"].IsNull) TestScript.WorldReply = inf["worldtest"];
                         else if (inf["tiletest"] != null && !inf["tiletest"].IsNull) TestScript.TileTest = inf["tiletest"];
@@ -172,6 +183,7 @@ namespace AutonautsCoop
             {
                 SteamNet.Pump();
                 Session.Tick();
+                VersionCheck.Tick();
                 if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); }
                 else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); }
                 Locks.Tick();

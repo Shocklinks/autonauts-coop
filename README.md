@@ -3,9 +3,9 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.6.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.8.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 42/42 over TCP, 44/44 over the Steam-style wire)
+## What works (automated two-instance test: 59/59 over TCP, 49/49 over the Steam-style wire)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
@@ -21,24 +21,30 @@ Status: **alpha 0.6.0**. Not affiliated with Denki or Curve Games. Contains no g
   in the inventory screen (drag, click, ctrl-click). Inventory keys (stow, recall, cycle, swap, use) work.
 - Building menus open on the joiner who engaged the building (not on the host): recipes (workbenches and other
   converters), research choice/cancel, storage lock, animal stations, upgrades, cancel build, sign text and area.
-- World state follows the host after join: quests/research, the host's unlock set (build palette), resources,
-  time of day, the saved script library, bot groups and offworld missions.
+- World state follows the host live: quests/research progress, building and object unlocks (build palette),
+  resources, time of day, the saved script library, bot groups, offworld missions and the wardrobe's stored clothes.
+- Wardrobe and aquarium screens open on the joiner; taking or storing clothes/fish goes through the host.
+  Catapult and spaceport screens are host-only (joiners get a notice).
 - If the host leaves (quits, crashes, times out or goes back to its menu), joiners get a message and return to the
   main menu. If the host leaves the world, hosting stops.
 - Animations on the joiner: farmers' actions (chop, dig, idle...) are mirrored from the host; walking hops are
   reproduced from movement.
-- A joiner who leaves keeps their character; rejoining with the same name gets it (and its pockets) back.
+- A joiner who leaves keeps their character; rejoining gets it (and its pockets) back, matched by SteamID on Steam
+  and by name on IP. This survives the host saving, quitting and loading the world again (the save records who
+  owns which character; the host always gets its own back).
+- Version check: host and joiner must run the same AutonautsCoop and Autonauts version. A mismatched joiner is
+  refused with a message saying which versions differ.
 - Joiner clicks made while their character is mid-action are held for up to 3 s and retried.
 - Self-healing: every 10 s the host sends a (uid, hash) digest; the joiner re-requests anything that drifted.
 
 ## Not done / known issues
 
 - Joiners editing the script library (saving/renaming stored scripts) isn't forwarded yet; they see the host's.
-- Bot server menu, spaceport, planning mode and game speed are host-only for now.
-- Building unlocks/research done after joining aren't pushed to joiners yet (their build palette may lag).
-- Joiner inventory, research and wardrobe screens are not synced.
+- Bot server menu, catapult, spaceport, planning mode and game speed are host-only for now.
+- An unlock that lands while a joiner has edit mode open shows after they reopen edit mode.
 - Steam invites are written but **not yet tested on real Steam** (needs two PCs, two accounts that each own the game).
 - A joiner who disconnects leaves their character standing until they rejoin.
+- Joiners on 0.7.0 or older can't get the version message from a 0.8.0 host (they just get disconnected).
 - Not tested over the internet or on large late-game bases.
 
 ## Connecting

@@ -23,6 +23,7 @@ namespace AutonautsCoop
         static bool Carrying(FarmerPlayer p, int uid) { foreach (var h in p.m_FarmerCarry.m_CarryObject) if (h && h.m_UniqueID == uid) return true; return false; }
         static TileCoord Walkable(TileCoord from, int dx, int dy) => Sync.FreeTileNear(new TileCoord(from.x + dx, from.y + dy), true);
 
+        public static int WardrobeUid = -1; public static JSONNode UnlockReply;
         public static int WbUid = -1; static string pickedRecipe; public static JSONNode ConvState, WorldReply;
         static void HostReq(string a, Action<JSONObject> args = null) { var n = new JSONObject(); n["a"] = a; args?.Invoke(n); Coop.I.Client.Host.Send(Msg.Input, n.ToString()); }
         static int axeUid = -1, treeUid = -1, logsBefore, bpUid = -1, dragCount, botUid = -1;
@@ -122,7 +123,13 @@ namespace AutonautsCoop
             s.Add(el => HostActRequested);
             s.Add(el => { HostAct(); return true; });
             s.Add(el => { if (el > 6f) { Plugin.Log("[test] host now at " + Tile(Me()).x + "," + Tile(Me()).y + " state " + Me().m_State); return true; } return false; });
-            s.Add(el => el > 900f || ClientGone() || HostQuitRequested);
+            if (TestBot.Transport == "tcp")
+                s.Add(el => { TestBot.Assert("host: refused a joiner with a different mod version", VersionCheck.Rejected >= 1, "refused " + VersionCheck.Rejected); return true; });
+            s.Add(el =>
+            {
+                if (SaveReloadPhase > 0) { SaveReloadTick(); return false; }
+                return el > 1400f || (!AwaitingRejoin() && ClientGone()) || HostQuitRequested;
+            });
             s.Add(el =>
             {
                 if (!HostQuitRequested) return true;
@@ -207,13 +214,80 @@ namespace AutonautsCoop
                     if (w) { w.StopAllScripts(); w.SendAction(new ActionInfo(ActionType.DropAll, w.m_TileCoord)); }
                     return true;
                 }
+                case "test_unlockbuilding":
+                {
+                    ObjectType pick = ObjectTypeList.m_Total;
+                    foreach (var kv in QuestManager.Instance.m_BuildingsLocked) { pick = kv.Key; break; }
+                    if (pick != ObjectTypeList.m_Total) QuestManager.Instance.UnlockObject(pick);
+                    var st = new JSONObject(); st["type"] = ObjectTypeList.Instance.GetSaveNameFromIdentifier(pick); st["count"] = QuestManager.Instance.m_BuildingsLocked.Count;
+                    var r = new JSONObject(); r["unlock"] = st; from.Send(Msg.Info, r.ToString());
+                    Plugin.Log("[test] unlocked building " + pick);
+                    return true;
+                }
+                case "test_wardrobe":
+                {
+                    Sync.PeerPlayers.TryGetValue(from, out int pu);
+                    var pt = ObjectTypeList.Instance.GetObjectFromUniqueID(pu, false).GetComponent<TileCoordObject>().m_TileCoord;
+                    Building b = null; TileCoord t = pt;
+                    foreach (var off in new[] { new TileCoord(-3, 3), new TileCoord(3, 3), new TileCoord(-3, -3), new TileCoord(3, -3), new TileCoord(0, 5), new TileCoord(5, 0) })
+                    {
+                        t = Sync.FreeTileNear(new TileCoord(pt.x + off.x, pt.y + off.y));
+                        b = BuildingManager.Instance.AddBuilding(t, ObjectType.Wardrobe, 0, false, null, true);
+                        if (b) break;
+                    }
+                    if (b)
+                    {
+                        var hat = ObjectTypeList.Instance.CreateObjectFromIdentifier(ObjectType.HatChullo, b.transform.position, Quaternion.identity).GetComponent<Holdable>();
+                        b.GetComponent<Wardrobe>().AttemptAdd(hat);
+                    }
+                    var r = new JSONObject(); r["wardrobe"] = b ? b.m_UniqueID : -1; from.Send(Msg.Info, r.ToString());
+                    Plugin.Log("[test] built wardrobe " + (b ? b.m_UniqueID : -1));
+                    return true;
+                }
                 case "test_hostquit":
                     HostQuitRequested = true;
+                    return true;
+                case "test_savereload":
+                    SaveReloadPhase = 1;
                     return true;
             }
             return false;
         }
         public static bool HostQuitRequested;
+
+        // ---- host: save the co-op world, stop, load it again, host again (what a player does the next day) ----
+        public static int SaveReloadPhase; static float phaseT, reloadedAt = -1; static int hostBefore;
+        const string ReloadSave = "coop_test_reload";
+        static void SaveReloadTick()
+        {
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (SaveReloadPhase == 1)
+            {
+                hostBefore = Sync.HostPlayerUID;
+                bool saved = SaveLoadManager.Instance.Save(ReloadSave);
+                TestBot.Assert("host: saved the co-op world", saved);
+                TestBot.Assert("host: save records the joiner's seat", Persist.Seats.Count >= 1, Persist.Seats.Count + " seat(s)");
+                Session.StopHost("test: reload");
+                SessionManager.Instance.m_LoadFileName = ReloadSave;
+                SessionManager.Instance.LoadLevel(true, "Main");
+                SaveReloadPhase = 2; phaseT = now;
+                Plugin.Log("[test] saved and reloading " + ReloadSave);
+            }
+            else if (SaveReloadPhase == 2)
+            {
+                if (now - phaseT < 5f || !Coop.InGame() || GameStateManager.Instance.GetActualState() != GameStateManager.State.Normal) { SkipLoadCeremony(); return; }
+                if (now - phaseT < 12f) return;
+                int players = 0; foreach (var kv in Sync.Savables()) if (kv.Key && kv.Key.m_TypeIdentifier == ObjectType.FarmerPlayer) players++;
+                TestBot.Assert("host: reloaded world still has the joiner's character", players >= 2, players + " FarmerPlayers");
+                TestBot.Assert("host: after reload the host controls its own character", Me().m_UniqueID == hostBefore, "player0 " + Me().m_UniqueID + " was " + hostBefore);
+                Coop.I.StartHost(TestBot.Port);
+                TestBot.Assert("host: hosting again after reload, same host player", Sync.HostPlayerUID == hostBefore, Sync.HostPlayerUID + " vs " + hostBefore);
+                SaveReloadPhase = 0; reloadedAt = now;
+            }
+        }
+        static void SkipLoadCeremony() { }
+        static bool AwaitingRejoin() => SaveReloadPhase > 0 || (reloadedAt > 0 && UnityEngine.Time.realtimeSinceStartup - reloadedAt < 240f && !JoinedPeer());
+        static bool JoinedPeer() { lock (Coop.I.Host.Peers) return Coop.I.Host.Peers.Exists(p => p.Alive && p.Name != "?"); }
 
         public static bool HostActRequested;
         /// Host acts in the world (walk + tile change) when the client test asks for it.
@@ -240,11 +314,13 @@ namespace AutonautsCoop
         static int chkTries;
         public static JSONNode TileTest; public static JSONNode Chk; public static JSONNode Blob;
         static bool udpStarted; static float lastHello;
+        static bool versionTried; static float vT;
+        static int seatUid = -1; static List<int> seatStuff = new List<int>(); static float rejoinTry;
         static void ResendHello()
         {
             if (UnityEngine.Time.realtimeSinceStartup - lastHello < 3f) return;
             lastHello = UnityEngine.Time.realtimeSinceStartup;
-            var hello = new JSONObject(); hello["protocol"] = Coop.Protocol; hello["name"] = "player";
+            var hello = Coop.MakeHello(); hello["name"] = "player";
             Coop.I.Client.Host.Send(Msg.Hello, hello.ToString());
             Plugin.Log("[test] resent hello");
         }
@@ -272,6 +348,24 @@ namespace AutonautsCoop
                     if (el > 4f) { ResendHello(); return false; }
                     return false;
                 }
+                if (!versionTried)
+                {
+                    // first knock with a wrong version: the host must refuse it and say why
+                    VersionCheck.FakeVersion = "0.0.1-test";
+                    try { Coop.I.StartClient(TestBot.Ip, TestBot.Port); versionTried = true; vT = el; }
+                    catch (System.Exception e) { Plugin.Log("connect retry: " + e.Message); }
+                    return false;
+                }
+                if (VersionCheck.FakeVersion != null)
+                {
+                    bool refused = Coop.Role == Role.Off && Session.LastDisconnect != null && Session.LastDisconnect.Contains("Version mismatch");
+                    if (!refused && el - vT < 20f) return false;
+                    TestBot.Assert("client: wrong mod version refused with a reason", refused, Session.LastDisconnect ?? "no message");
+                    VersionCheck.FakeVersion = null; Session.LastDisconnect = null;
+                    if (Coop.Role != Role.Off) Session.ClientLost("test cleanup");
+                    vT = el; return false;
+                }
+                if (el - vT < 3f) return false;
                 try { Coop.I.StartClient(TestBot.Ip, TestBot.Port); return true; }
                 catch (System.Exception e) { Plugin.Log("connect retry: " + e.Message); return false; }
             });
@@ -664,6 +758,7 @@ namespace AutonautsCoop
                     GameStateManager.Instance.PopState(); return true;
                 }
                 pickedRecipe = ObjectTypeList.Instance.GetSaveNameFromIdentifier(res[0].m_Type);
+                ConvState = null;
                 // exactly what ConverterSelect does when a recipe button is clicked
                 var me = conv.m_Engager;
                 me.SendAction(new ActionInfo(ActionType.SetValue, me.GetComponent<TileCoordObject>().m_TileCoord, conv, Converter.m_ResultsToCreateName, pickedRecipe));
@@ -674,7 +769,7 @@ namespace AutonautsCoop
             });
             s.Add(el =>
             {
-                if (UnityEngine.Time.realtimeSinceStartup > nextBotQuery) { nextBotQuery = UnityEngine.Time.realtimeSinceStartup + 2f; ConvState = null; HostReq("test_convstate", n => n["w"] = WbUid); }
+                if (UnityEngine.Time.realtimeSinceStartup > nextBotQuery) { nextBotQuery = UnityEngine.Time.realtimeSinceStartup + 2f; HostReq("test_convstate", n => n["w"] = WbUid); }
                 bool ok = ConvState != null && ConvState["result"].Value == pickedRecipe && !ConvState["engaged"].AsBool && ConvState["hoststate"].Value != "BuildingSelect";
                 if (!ok && el < 20f) return false;
                 TestBot.Assert("host: workbench makes the joiner's recipe, joiner disengaged, host screen untouched", ok, ConvState?.ToString());
@@ -694,7 +789,77 @@ namespace AutonautsCoop
                     "client " + c + "/" + l + "/" + tod.ToString("F2") + " host " + WorldReply["completed"].AsInt + "/" + WorldReply["locked"].AsInt + "/" + WorldReply["tod"].AsFloat.ToString("F2"));
                 return true;
             });
-            // 12. animations reached the joiner (chopping, idle...)
+            // 12. building unlocks after join: host unlocks a building, the joiner's build palette data follows
+            s.Add(el => { UnlockReply = null; HostReq("test_unlockbuilding"); return true; });
+            s.Add(el =>
+            {
+                if (UnlockReply == null && el < 10f) return false;
+                if (UnlockReply == null) { TestBot.Assert("client: unlock reply", false); return true; }
+                var t = ObjectTypeList.Instance.GetIdentifierFromSaveName(UnlockReply["type"], false);
+                bool ok = t != ObjectTypeList.m_Total && !QuestManager.Instance.m_BuildingsLocked.ContainsKey(t) && QuestManager.Instance.m_BuildingsLocked.Count == UnlockReply["count"].AsInt;
+                if (!ok && el < 15f) return false;
+                TestBot.Assert("client: building unlocked on the host shows as unlocked for the joiner", ok, (string)UnlockReply["type"] + " client locked " + QuestManager.Instance.m_BuildingsLocked.Count + " host " + UnlockReply["count"].AsInt);
+                return true;
+            });
+            // 13. wardrobe: engage it (screen opens on the joiner, not the host), put on a hat from it, close
+            s.Add(el => { WardrobeUid = -1; HostReq("test_wardrobe"); return true; });
+            s.Add(el =>
+            {
+                var wr = Obj(WardrobeUid);
+                if (!wr && el < 15f) return false;
+                TestBot.Assert("client: host-built wardrobe visible", wr != null);
+                if (wr) Click(wr.GetComponent<Building>().GetAccessPosition(), wr, AFO.AT.Primary);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var gs = GameStateManager.Instance.GetCurrentState();
+                var inv = gs ? gs.GetComponent<GameStateInventory>() : null;
+                bool ok = inv && inv.m_SecondBar && inv.m_SecondBar.m_Object && inv.m_SecondBar.m_Object.m_UniqueID == WardrobeUid;
+                if (!ok && el < 40f) return false;
+                TestBot.Assert("client: wardrobe screen opened on the joiner", ok);
+                return true;
+            });
+            s.Add(el =>
+            {
+                if (el < 1f) return false;
+                var inv = GameStateManager.Instance.GetCurrentState().GetComponent<GameStateInventory>();
+                if (inv == null) return true;
+                InventorySlot src = null;
+                foreach (var g in inv.m_SecondBar.m_WardrobeSlots.m_Buttons) { var sl = g.GetComponent<InventorySlot>(); if (sl && sl.m_Object) { src = sl; break; } }
+                var panel = Traverse.Create(inv).Field("m_Panel").GetValue<InventoryBar>();
+                var slots = panel ? Traverse.Create(panel).Field("m_ClothingSlots").GetValue<InventorySlot[]>() : null;
+                InventorySlot dst = null;
+                if (slots != null) foreach (var sl in slots) if (sl && src && sl.CanAcceptObject(src)) { dst = sl; break; }
+                if (!src || !dst) { if (el < 15f) return false; TestBot.Assert("client: hat in wardrobe and a free clothing slot", false, "src " + (src != null) + " dst " + (dst != null)); return true; }
+                inv.m_SecondBar.DragStart(src);
+                var drag = GameStateManager.Instance.GetCurrentState().GetComponent<GameStateDragInventorySlot>();
+                if (drag == null) return false;
+                drag.SetDragTarget(dst);
+                inv.m_SecondBar.DragEnd(dst);
+                Plugin.Log("[test] dragged " + src.m_Object.m_TypeIdentifier + " from wardrobe to " + dst.m_Type);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var me = Obj(Sync.MyPlayerUID);
+                bool ok = me && Sync.SaveObject(me, out _).Contains("HatChullo");
+                if (!ok && el < 20f) return false;
+                TestBot.Assert("client: wearing the hat from the wardrobe (via host)", ok);
+                var gs2 = GameStateManager.Instance.GetCurrentState();
+                var inv = gs2 ? gs2.GetComponent<GameStateInventory>() : null;
+                ConvState = null; if (inv) inv.Close();
+                return true;
+            });
+            s.Add(el =>
+            {
+                if (UnityEngine.Time.realtimeSinceStartup > nextBotQuery) { nextBotQuery = UnityEngine.Time.realtimeSinceStartup + 2f; HostReq("test_convstate", n => n["w"] = WardrobeUid); }
+                bool ok = ConvState != null && !ConvState["engaged"].AsBool && ConvState["hoststate"].Value == "Normal";
+                if (!ok && el < 20f) return false;
+                TestBot.Assert("host: joiner left the wardrobe, host screen untouched", ok, ConvState?.ToString());
+                return true;
+            });
+            // 14. animations reached the joiner (chopping, idle...)
             s.Add(el => { TestBot.Assert("client: host-side animations played on the joiner", Anim.Played > 0, "played " + Anim.Played); return true; });
             s.Add(el => { Chk = null; var n = new JSONObject(); n["a"] = "chk"; Coop.I.Client.Host.Send(Msg.Input, n.ToString()); return true; });
             s.Add(el =>
@@ -727,6 +892,48 @@ namespace AutonautsCoop
                 foreach (var kv in Sync.RecreatedByType) Plugin.Log("[test]   recreated " + kv.Key + " x" + kv.Value);
                 return true;
             });
+            // 15. host saves, reloads the world and hosts again; I rejoin and get my character and pockets back
+            if (TestBot.Transport == "tcp")
+            {
+                s.Add(el =>
+                {
+                    seatUid = Sync.MyPlayerUID; seatStuff.Clear();
+                    Sync.CollectUIDs(Sync.SaveObject(Me(), out _), seatUid, seatStuff); seatStuff.Sort();
+                    Plugin.Log("[test] before reload: me " + seatUid + " holding [" + string.Join(",", seatStuff.ConvertAll(x => x.ToString()).ToArray()) + "]");
+                    HostReq("test_savereload"); return true;
+                });
+                s.Add(el =>
+                {
+                    bool ok = Coop.Role == Role.Off && TestBot.AtMainMenu();
+                    if (!ok && el < 60f) return false;
+                    TestBot.Assert("client: host reload sent me to the menu", ok, Session.LastDisconnect ?? "");
+                    return true;
+                });
+                s.Add(el =>
+                {
+                    if (el < 5f || UnityEngine.Time.realtimeSinceStartup < rejoinTry) return false;
+                    rejoinTry = UnityEngine.Time.realtimeSinceStartup + 3f;
+                    try { Session.LastDisconnect = null; Coop.I.StartClient(TestBot.Ip, TestBot.Port); return true; }
+                    catch (System.Exception e) { Plugin.Log("rejoin retry: " + e.Message); return false; }
+                });
+                s.Add(el =>
+                {
+                    if (Coop.Role == Role.Off) { TestBot.Assert("client: rejoined after the host reloaded", false, Session.LastDisconnect ?? "dropped"); return true; }
+                    return Coop.I.ClientLoaded && Obj(Sync.MyPlayerUID) && el > 3f;
+                });
+                s.Add(el =>
+                {
+                    var now = new List<int>();
+                    Sync.CollectUIDs(Sync.SaveObject(Me(), out _), Sync.MyPlayerUID, now); now.Sort();
+                    int players = CountType(ObjectType.FarmerPlayer);
+                    TestBot.Assert("client: rejoined after the host reloaded", Coop.I.ClientLoaded);
+                    TestBot.Assert("client: got my old character back after reload", Sync.MyPlayerUID == seatUid && Me().m_UniqueID == seatUid, "now " + Sync.MyPlayerUID + " was " + seatUid);
+                    TestBot.Assert("client: my pockets/hands survived the reload", string.Join(",", now.ConvertAll(x => x.ToString()).ToArray()) == string.Join(",", seatStuff.ConvertAll(x => x.ToString()).ToArray()),
+                        "now [" + string.Join(",", now.ConvertAll(x => x.ToString()).ToArray()) + "]");
+                    TestBot.Assert("client: no duplicate character after reload", players == 2, players + " FarmerPlayers");
+                    return true;
+                });
+            }
             // 13. host leaves: the joiner gets a message and goes back to the main menu
             s.Add(el => { HostReq("test_hostquit"); return true; });
             s.Add(el =>

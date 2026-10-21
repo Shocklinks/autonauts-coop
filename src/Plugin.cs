@@ -1,5 +1,5 @@
 // AutonautsCoop - host-authoritative co-op for Autonauts
-// Version 0.6.0 - 2026-10-20 - Created with Claude
+// Version 0.8.0 - 2026-10-20 - Created with Claude
 using System;
 using System.IO;
 using BepInEx;
@@ -13,14 +13,14 @@ namespace AutonautsCoop
     {
         public static Plugin Instance;
         public static string LogPath;
-        public const string Version = "0.6.0";
+        public const string Version = "0.8.0";
 
         void Awake()
         {
             Instance = this;
             LogPath = Path.Combine(Paths.BepInExRootPath, "coop.log");
             File.WriteAllText(LogPath, "");
-            Log("AutonautsCoop 0.2.0 loaded. Unity " + Application.unityVersion);
+            Log("AutonautsCoop " + Version + " loaded. Unity " + Application.unityVersion);
             Application.runInBackground = true;
             new Harmony("autonauts.coop").PatchAll();
             Log("patched");

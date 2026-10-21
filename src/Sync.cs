@@ -21,7 +21,6 @@ namespace AutonautsCoop
         public static int HostPlayerUID = -1;       // host: the host's own FarmerPlayer
         public static int MyPlayerUID = -1;         // client: my FarmerPlayer (spawned by host)
         public static readonly Dictionary<Peer, int> PeerPlayers = new Dictionary<Peer, int>();
-        static readonly Dictionary<string, int> seats = new Dictionary<string, int>();   // player name -> FarmerPlayer (host, this session)
         public static bool Applying;                // client: true while applying host data
 
         // stats (for logs and tests)
@@ -91,8 +90,12 @@ namespace AutonautsCoop
 
         public static void OnHostStart()
         {
+            Persist.Ensure();
             var players = CollectionManager.Instance.GetPlayers();
-            HostPlayerUID = players.Count > 0 ? players[0].m_UniqueID : -1;
+            // A world saved during co-op holds the joiners' characters too; the save says which one is ours.
+            HostPlayerUID = Persist.HostUid >= 0 && ObjectTypeList.Instance.GetObjectFromUniqueID(Persist.HostUid, false) ? Persist.HostUid
+                          : players.Count > 0 ? players[0].m_UniqueID : -1;
+            Persist.HostUid = HostPlayerUID;
             sentHash.Clear(); sentPos.Clear();
             foreach (var pl in players) Plugin.Log("  player uid " + pl.m_UniqueID + " type " + pl.GetType().Name + " active " + pl.gameObject.activeInHierarchy + " tile " + pl.GetComponent<TileCoordObject>().m_TileCoord.x + "," + pl.GetComponent<TileCoordObject>().m_TileCoord.y + " name " + pl.name);
             Plugin.Log("host player uid " + HostPlayerUID + " tile " + (players.Count > 0 ? players[0].GetComponent<TileCoordObject>().m_TileCoord.x + "," + players[0].GetComponent<TileCoordObject>().m_TileCoord.y : "-")
@@ -103,11 +106,13 @@ namespace AutonautsCoop
         public static void OnPeerJoined(Peer p)
         {
             // Spawn a FarmerPlayer for this peer next to the host's player.
-            if (!PeerPlayers.TryGetValue(p, out int uid) && seats.TryGetValue(p.Name, out int seat)
+            Persist.Ensure();
+            if (!PeerPlayers.TryGetValue(p, out int uid) && (Persist.Seats.TryGetValue(Persist.Key(p), out int seat) || Persist.Seats.TryGetValue("name:" + p.Name, out seat))
                 && ObjectTypeList.Instance.GetObjectFromUniqueID(seat, false) && !PeerPlayers.ContainsValue(seat))
             {
                 // Same player rejoining this session: give them their character (and pockets) back.
                 uid = seat; PeerPlayers[p] = uid;
+                Persist.Seats.Remove("name:" + p.Name); Persist.Seats[Persist.Key(p)] = uid;
                 Plugin.Log("peer " + p.Id + " (" + p.Name + ") back in FarmerPlayer " + uid);
             }
             if (!PeerPlayers.ContainsKey(p))
@@ -118,7 +123,7 @@ namespace AutonautsCoop
                 var fp = ObjectTypeList.Instance.CreateObjectFromIdentifier(ObjectType.FarmerPlayer, spawn.ToWorldPositionTileCentered(), Quaternion.identity);
                 uid = fp.m_UniqueID;
                 PeerPlayers[p] = uid;
-                seats[p.Name] = uid;
+                Persist.Seats[Persist.Key(p)] = uid;
                 Plugin.Log("spawned FarmerPlayer uid " + uid + " for peer " + p.Id);
             }
             // The snapshot was captured before the spawn, so force a full resend of what changed.
@@ -545,6 +550,18 @@ namespace AutonautsCoop
                 Create(o);
                 return;
             }
+            if (b && b.transform.parent && b.transform.parent.GetComponentInParent<BaseClass>())
+            {
+                // Host has this as a free-standing object, but our copy is still a child of something
+                // (e.g. a bees nest that fell out of its tree). Detach by rebuilding it on its own.
+                var holder = b.transform.parent.GetComponentInParent<BaseClass>();
+                Plugin.Log("detaching " + o["ID"] + " " + uid + " from " + holder.m_TypeIdentifier + " " + holder.m_UniqueID);
+                var tree = holder.GetComponent<MyTree>();
+                if (tree && tree.m_BeesNest == b) tree.m_BeesNest = null;
+                Destroy(b); StatRecreated++; Count("detach:" + (string)o["ID"]);
+                Create(o);
+                return;
+            }
             if (b)
             {
                 var wantType = ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false);
@@ -603,7 +620,7 @@ namespace AutonautsCoop
 
         static readonly System.Text.RegularExpressions.Regex UidRx = new System.Text.RegularExpressions.Regex("\"UID\"\\s*:\\s*(-?\\d+)");
         /// All UIDs mentioned in the object's JSON except its own (one occurrence of the root UID is skipped).
-        static void CollectUIDs(string json, int rootUid, List<int> into)
+        public static void CollectUIDs(string json, int rootUid, List<int> into)
         {
             bool skipped = false;
             foreach (System.Text.RegularExpressions.Match m in UidRx.Matches(json))
@@ -746,7 +763,8 @@ namespace AutonautsCoop
     {
         static void Postfix(List<BaseClass> __result)
         {
-            int mine = Coop.Role == Role.Client ? Sync.MyPlayerUID : Coop.Role == Role.Host ? Sync.HostPlayerUID : -1;
+            if (Coop.Role == Role.Off) Persist.Ensure();
+            int mine = Coop.Role == Role.Client ? Sync.MyPlayerUID : Coop.Role == Role.Host ? Sync.HostPlayerUID : Persist.HostUid;
             if (mine < 0 || __result == null || __result.Count < 2) return;
             if (__result[0] && __result[0].m_UniqueID == mine) return;
             int i = __result.FindIndex(b => b && b.m_UniqueID == mine);

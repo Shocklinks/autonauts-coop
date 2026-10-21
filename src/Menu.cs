@@ -36,6 +36,8 @@ namespace AutonautsCoop
             try { Locks.OnGUI(); } catch (Exception e) { Plugin.Log("lock label: " + e.Message); }
             if (toast != null && Time.realtimeSinceStartup < toastUntil)
                 GUI.Box(new Rect(Screen.width / 2 - 200, Screen.height / 2 - 120, 400, 28), toast);
+            if (Coop.Role == Role.Off && Session.LastDisconnect != null && Time.realtimeSinceStartup - Session.LastDisconnectAt < 20f)
+                GUI.Box(new Rect(Screen.width / 2 - 320, 40, 640, 48), Session.LastDisconnect);
             if (Coop.Role != Role.Off)
             {
                 string s = Coop.Role == Role.Host ? "Co-op host: " + PeerCount() + " joined (port " + Coop.I.Port + ")"
