@@ -15,6 +15,16 @@ explain results in short, plain sentences, and ask before anything public (relea
 - **Status:** alpha. Automated suites pass (see QA). Never tested yet on real Steam between two PCs, over the internet,
   or on real medium/large late-game saves.
 
+## How updates reach GitHub (owner's setup)
+
+- The owner uses **GitHub Desktop** with both repos cloned on their PC in `D:\Documents\GitHub\autonauts-coop` and
+  `D:\Documents\GitHub\coop-anything`. Sessions are linked to the PC, not to GitHub (they can't have both).
+- Ask for access to `D:\Documents\GitHub` and write changed files into those clones.
+- Then tell the owner the commit message to type. In GitHub Desktop they click **Commit to main** and **Push origin**.
+  For the hub, they switch to branch `game/autonauts` first, after **Fetch origin** and a sync with upstream.
+- Releases: the owner creates them on github.com and attaches the zip `tools/package.sh` built.
+- Don't overwrite files the owner changed: compare with the clone first.
+
 ## Repos
 
 | Repo | Role |
