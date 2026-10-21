@@ -3,9 +3,9 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.5.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.6.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 35/35 over TCP, 37/37 over the Steam-style wire)
+## What works (automated two-instance test: 42/42 over TCP, 44/44 over the Steam-style wire)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
@@ -19,16 +19,24 @@ Status: **alpha 0.5.0**. Not affiliated with Denki or Curve Games. Contains no g
   can't record or play it until they're done (host and joiners, enforced on the host).
 - Joiners rename bots, and move items between their hands, pockets, upgrade slots, bots, wardrobes and aquariums
   in the inventory screen (drag, click, ctrl-click). Inventory keys (stow, recall, cycle, swap, use) work.
+- Building menus open on the joiner who engaged the building (not on the host): recipes (workbenches and other
+  converters), research choice/cancel, storage lock, animal stations, upgrades, cancel build, sign text and area.
+- World state follows the host after join: quests/research, the host's unlock set (build palette), resources,
+  time of day, the saved script library, bot groups and offworld missions.
+- If the host leaves (quits, crashes, times out or goes back to its menu), joiners get a message and return to the
+  main menu. If the host leaves the world, hosting stops.
+- Animations on the joiner: farmers' actions (chop, dig, idle...) are mirrored from the host; walking hops are
+  reproduced from movement.
 - A joiner who leaves keeps their character; rejoining with the same name gets it (and its pockets) back.
 - Joiner clicks made while their character is mid-action are held for up to 3 s and retried.
 - Self-healing: every 10 s the host sends a (uid, hash) digest; the joiner re-requests anything that drifted.
 
 ## Not done / known issues
 
-- Saved/linked script library isn't synced for joiners yet.
+- Joiners editing the script library (saving/renaming stored scripts) isn't forwarded yet; they see the host's.
+- Bot server menu, spaceport, planning mode and game speed are host-only for now.
 - Building unlocks/research done after joining aren't pushed to joiners yet (their build palette may lag).
 - Joiner inventory, research and wardrobe screens are not synced.
-- Joiner side: bots and animals slide without walk animations (simulation is frozen on the joiner).
 - Steam invites are written but **not yet tested on real Steam** (needs two PCs, two accounts that each own the game).
 - A joiner who disconnects leaves their character standing until they rejoin.
 - Not tested over the internet or on large late-game bases.

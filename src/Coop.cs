@@ -141,6 +141,10 @@ namespace AutonautsCoop
                         var inf = JSON.Parse(Encoding.UTF8.GetString(p.Data));
                         if (inf["you"] != null && !inf["you"].IsNull) { Sync.MyPlayerUID = inf["you"].AsInt; Locks.MyKey = inf["key"]; Plugin.Log("my player uid " + Sync.MyPlayerUID + " key " + Locks.MyKey); }
                         else if (inf["locks"] != null && !inf["locks"].IsNull) Locks.ClientReceive(inf["locks"].AsArray);
+                        else if (inf["open"] != null && !inf["open"].IsNull) Menus.ClientOpen(inf);
+                        else if (inf["wb"] != null && !inf["wb"].IsNull) TestScript.WbUid = inf["wb"].AsInt;
+                        else if (inf["conv"] != null && !inf["conv"].IsNull) TestScript.ConvState = inf["conv"];
+                        else if (inf["worldtest"] != null && !inf["worldtest"].IsNull) TestScript.WorldReply = inf["worldtest"];
                         else if (inf["tiletest"] != null && !inf["tiletest"].IsNull) TestScript.TileTest = inf["tiletest"];
                         else if (inf["chk"] != null && !inf["chk"].IsNull) TestScript.Chk = inf["chk"];
                         else if (inf["blob"] != null && !inf["blob"].IsNull) TestScript.Blob = inf;
@@ -167,6 +171,7 @@ namespace AutonautsCoop
             try
             {
                 SteamNet.Pump();
+                Session.Tick();
                 if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); }
                 else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); }
                 Locks.Tick();

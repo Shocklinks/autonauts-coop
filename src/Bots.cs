@@ -164,7 +164,8 @@ namespace AutonautsCoop
         static void Describe(InventorySlot s, JSONObject into, string prefix)
         {
             var bar = s.m_Parent;
-            into[prefix + "h"] = bar.m_Object ? bar.m_Object.m_UniqueID : -1;
+            // the holder may have just been rebuilt by sync (destroyed copy); use the UID the bar was bound to
+            into[prefix + "h"] = bar.m_Object ? bar.m_Object.m_UniqueID : UiRebind.BoundUid(bar);
             into[prefix + "t"] = (int)s.m_Type;
             int idx = -1;
             if (bar.m_CarrySlots != null && bar.m_CarrySlots.m_Buttons.Contains(s)) idx = bar.m_CarrySlots.m_Buttons.IndexOf(s);
@@ -398,6 +399,7 @@ namespace AutonautsCoop
     {
         static readonly Dictionary<InventoryBar, int> bound = new Dictionary<InventoryBar, int>();
         public static void Bound(InventoryBar bar, BaseClass o) { if (bar && o) bound[bar] = o.m_UniqueID; }
+        public static int BoundUid(InventoryBar bar) => bar && bound.TryGetValue(bar, out int u) ? u : -1;
         static float next;
 
         public static void Tick()
@@ -422,4 +424,10 @@ namespace AutonautsCoop
 
     [HarmonyPatch(typeof(InventoryBar), nameof(InventoryBar.SetObject))]
     static class P_BarBound { static void Postfix(InventoryBar __instance, BaseClass NewObject) { UiRebind.Bound(__instance, NewObject); } }
+
+    // While sync rebuilds an object, the open inventory screen gets callbacks for it (FarmerInventory.SetCapacity ->
+    // GameStateInventory.CheckTargetUpdated) while its panel still points at the old, destroyed copy, and throws
+    // half-way through creation. Skip those during apply; UiRebind points the screen at the new copy right after.
+    [HarmonyPatch(typeof(GameStateInventory), nameof(GameStateInventory.CheckTargetUpdated))]
+    static class P_InvNoCallbackDuringApply { static bool Prefix() { return !(Coop.Role == Role.Client && Sync.Applying); } }
 }

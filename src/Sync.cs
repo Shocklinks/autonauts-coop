@@ -225,6 +225,9 @@ namespace AutonautsCoop
                     var b = kv.Key;
                     if (b == null || b.m_UniqueID == -1 || !(b is Farmer || b is Animal || b is Vehicle)) continue;
                     var pos = b.transform.position;
+                    // strip the walking hop (FarmerStateMove adds it on top of the path position); joiners add their own
+                    var f = b as Farmer;
+                    if (f && f.m_State == Farmer.State.Moving) pos.y -= Anim.Hop(b, f.m_StateTimer);
                     if (sentPos.TryGetValue(b.m_UniqueID, out var old) && (old - pos).sqrMagnitude < 0.0004f) continue;
                     sentPos[b.m_UniqueID] = pos;
                     var a = new JSONArray();
@@ -232,10 +235,13 @@ namespace AutonautsCoop
                     mv.Add(a);
                 }
                 if (mv.Count > 0) { if (msg == null) msg = new JSONObject(); msg["mv"] = mv; }
+                var an = Anim.HostTake();
+                if (an != null) { if (msg == null) msg = new JSONObject(); msg["an"] = an; }
             }
 
             if (msg != null && msg.Count > 0)
                 Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(msg.ToString()));
+            WorldState.HostTick();
 
             if (now >= nextDigest)
             {
@@ -329,6 +335,7 @@ namespace AutonautsCoop
                 r["botstate"] = st; from.Send(Msg.Info, r.ToString());
                 return;
             }
+            if (TestBot.Active && TestScript.HostTestOp((string)n0["a"], n0, from)) return;
             if ((string)n0["a"] == "test_hostlock" && TestBot.Active)
             {
                 // test fixture: the host "opens" the bot in its editor (or closes it)
@@ -355,6 +362,8 @@ namespace AutonautsCoop
             var n = JSON.Parse(json);
             if (Teach.HostApply((string)n["a"], n, fp)) return;
             if (Inv.HostApply((string)n["a"], n, fp, from)) return;
+            if (Menus.HostApply((string)n["a"], n, fp)) return;
+            if (MenuActApply.HostApply((string)n["a"], n, fp)) return;
             if (KeyApply.HostApply((string)n["a"], n, fp)) return;
             switch ((string)n["a"])
             {
@@ -383,6 +392,8 @@ namespace AutonautsCoop
         static readonly List<byte[]> early = new List<byte[]>();
         static readonly Dictionary<int, Vector3> targetPos = new Dictionary<int, Vector3>();
         static readonly Dictionary<int, float> targetRot = new Dictionary<int, float>();
+        static readonly Dictionary<int, Vector3> basePos = new Dictionary<int, Vector3>();
+        static readonly Dictionary<int, float> movingUntil = new Dictionary<int, float>();
 
         public static void QueueEarlyDelta(byte[] d) { early.Add(d); }
 
@@ -409,6 +420,10 @@ namespace AutonautsCoop
             ObjectTypeList.m_Loading = true;
             try
             {
+                var wo = n["world"];
+                if (wo != null && !wo.IsNull) { WorldState.ClientApply(wo); return; }
+                var anim = n["an"];
+                if (anim != null && !anim.IsNull) Anim.ClientPlay(anim.AsArray);
                 var ae = n["ae"];
                 if (ae != null && !ae.IsNull) { ApplyDigest(ae.AsArray); return; }
                 var rm = n["rm"];
@@ -440,7 +455,9 @@ namespace AutonautsCoop
                 if (mv != null) foreach (JSONNode a in mv.AsArray)
                 {
                     int uid = a[0].AsInt;
-                    targetPos[uid] = new Vector3(a[1].AsFloat, a[2].AsFloat, a[3].AsFloat);
+                    var np = new Vector3(a[1].AsFloat, a[2].AsFloat, a[3].AsFloat);
+                    if (targetPos.TryGetValue(uid, out var prev) && (prev - np).sqrMagnitude > 0.001f) movingUntil[uid] = Time.realtimeSinceStartup + 0.25f;
+                    targetPos[uid] = np;
                     targetRot[uid] = a[4].AsFloat;
                 }
             }
@@ -564,6 +581,24 @@ namespace AutonautsCoop
             Plugin.Log("in-place mismatch " + type + " at " + i + "\n  want: " + want.Substring(from, Math.Min(200, want.Length - from)) + "\n  got:  " + got.Substring(from, Math.Min(200, got.Length - from)));
         }
 
+        static void CleanupUid(int uid)
+        {
+            try
+            {
+                var half = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
+                if (half) { try { half.StopUsing(); } catch { } }
+                var list = Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDList").GetValue<Dictionary<int, BaseClass>>();
+                if (list != null && list.TryGetValue(uid, out var still))
+                {
+                    list.Remove(uid);
+                    var ids = Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDs").GetValue<Dictionary<BaseClass, int>>();
+                    if (still && ids != null) ids.Remove(still);
+                }
+                Plugin.Log("cleaned up half-created object " + uid);
+            }
+            catch (Exception e) { Plugin.Log("cleanup " + uid + ": " + e.Message); }
+        }
+
         static void Count(string k) { RecreatedByType[k] = RecreatedByType.TryGetValue(k, out int c) ? c + 1 : 1; }
 
         static readonly System.Text.RegularExpressions.Regex UidRx = new System.Text.RegularExpressions.Regex("\"UID\"\\s*:\\s*(-?\\d+)");
@@ -594,8 +629,14 @@ namespace AutonautsCoop
             var reactivate = new List<GameObject>();
             var root = HudManager.Instance ? HudManager.Instance.m_IndicatorsRootTransform : null;
             for (var t = root; t != null; t = t.parent) if (!t.gameObject.activeSelf) { t.gameObject.SetActive(true); reactivate.Add(t.gameObject); }
-            BaseClass b;
+            BaseClass b = null;
             try { b = ObjectTypeList.Instance.CreateObjectFromSaveName(o, Vector3.zero, Quaternion.identity); }
+            catch
+            {
+                // Don't leave a half-built object holding the UID (every later create would fail with "same key").
+                CleanupUid(uid);
+                throw;
+            }
             finally { foreach (var g in reactivate) g.SetActive(false); }
             if (!b) return null;
             b.GetComponent<Savable>().Load(o);
@@ -646,11 +687,15 @@ namespace AutonautsCoop
                 var b = ObjectTypeList.Instance.GetObjectFromUniqueID(kv.Key, false);
                 if (!b) { drop.Add(kv.Key); continue; }
                 var t = b.transform;
-                t.position = (t.position - kv.Value).sqrMagnitude > 25f ? kv.Value : Vector3.Lerp(t.position, kv.Value, k);
+                if (!basePos.TryGetValue(kv.Key, out var bp)) bp = t.position;
+                bp = (bp - kv.Value).sqrMagnitude > 25f ? kv.Value : Vector3.Lerp(bp, kv.Value, k);
+                basePos[kv.Key] = bp;
+                bool walking = movingUntil.TryGetValue(kv.Key, out float mu) && Time.realtimeSinceStartup < mu;
+                t.position = walking ? bp + Vector3.up * Anim.Hop(b, Time.realtimeSinceStartup) : bp;
                 if (targetRot.TryGetValue(kv.Key, out float ry))
                     t.rotation = Quaternion.Slerp(t.rotation, Quaternion.Euler(0, ry, 0), k);
             }
-            foreach (var d in drop) { targetPos.Remove(d); targetRot.Remove(d); }
+            foreach (var d in drop) { targetPos.Remove(d); targetRot.Remove(d); basePos.Remove(d); movingUntil.Remove(d); }
         }
 
         public static void ClientSendGo(TileCoord dest, Actionable target, AFO.AT type)
