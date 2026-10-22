@@ -304,6 +304,7 @@ namespace AutonautsCoop
                         switch ((string)n["q"])
                         {
                             case "speed": r["s"] = TimeManager.Instance.m_TimeScale; break;
+                            case "look": r["y"] = o ? o.transform.eulerAngles.y : -999f; break;
                             case "lib":
                             {
                                 var names = new JSONArray(); foreach (var sc in WorkerScriptManager.Instance.m_Scripts) names.Add(sc.m_Name + "#" + sc.m_UID);
@@ -404,7 +405,7 @@ namespace AutonautsCoop
             return null;
         }
         static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
-        static ObjectType paletteType = ObjectTypeList.m_Total;
+        static ObjectType paletteType = ObjectTypeList.m_Total; static bool coverShown; static float lookYaw;
         static int groupId = -1, copyPlayer = -1, copyObjs = -1, autosBefore = -1, relocAtLeave = -1; static TileCoord undoTile, leaveTile, reloadTile; static float leaveAt;
         static WorkerGroup G(int id) => WorkerGroupManager.Instance.GetGroupFromID(id);
         static bool HasName(JSONNode arr, string name) { foreach (JSONNode x in arr.AsArray) if (((string)x).StartsWith(name)) return true; return false; }
@@ -713,6 +714,22 @@ namespace AutonautsCoop
                 if (!bot) return true;
                 botUid = bot.m_UniqueID;
                 GameStateManager.Instance.GetCurrentState().GetComponent<GameStateNormal>().SetSelectedWorker(bot.GetComponent<Worker>(), true, false);
+                return true;
+            });
+            // the editor's "stop the bot first" cover must go away again (it counts down with game time, frozen on joiners)
+            s.Add(el =>
+            {
+                var ed = TeachWorkerScriptEdit.Instance;
+                if ((ed == null || !ed.m_CurrentTarget) && el < 5f) return false;
+                if (ed == null) return true;
+                if (el < 0.5f) return false;
+                if (!coverShown) { AccessTools.Method(typeof(TeachWorkerScriptEdit), "DoNonEditable").Invoke(ed, null); coverShown = true; return false; }
+                var ne = Traverse.Create(ed).Field("m_NonEditable").GetValue<GameObject>();
+                bool hidden = !ne || !ne.activeSelf;
+                if (UnityEngine.Time.realtimeSinceStartup > nextDragLog) { nextDragLog = UnityEngine.Time.realtimeSinceStartup + 1f; Plugin.Log("[test] cover timer " + Traverse.Create(ed).Field("m_NonEditableTimer").GetValue<float>().ToString("F2") + " active " + (ne && ne.activeSelf) + " editor active " + ed.isActiveAndEnabled + " state " + GameStateManager.Instance.GetActualState()); }
+                if (!hidden && el < 8f) return false;
+                TestBot.Assert("client: script editor's 'not editable' cover clears by itself", hidden);
+                TestBot.Assert("client: camera/UI run on real frame time", RealTime.LastUiDelta > 0f, RealTime.LastUiDelta.ToString("F3"));
                 return true;
             });
             s.Add(el =>
@@ -1068,8 +1085,22 @@ namespace AutonautsCoop
                 }
                 TestBot.Assert("client: world checksum matches host", ok, Chk == null ? "no reply" : "host " + Chk["count"].AsInt + "/" + Chk["sum"].Value + " client " + c + "/" + sum);
                 Plugin.Log("[test] stats menus " + Menus.Opened + "/" + Menus.Sent + " world " + WorldState.Applied + " anims " + Anim.Played);
-                Plugin.Log("[test] stats inplace " + Sync.StatInPlace + " recreated " + Sync.StatRecreated + " created " + Sync.StatCreated + " removed " + Sync.StatRemoved + " batches " + Sync.StatBatches + " resync " + Sync.StatResync + " errors " + Sync.StatErrors + " digests " + Sync.StatDigests + " digestfixes " + Sync.StatDigestFixes + " swept " + Sync.StatSwept);
+                Plugin.Log("[test] stats inplace " + Sync.StatInPlace + " (farmers with held items " + Sync.StatNestedInPlace + ") recreated " + Sync.StatRecreated + " created " + Sync.StatCreated + " removed " + Sync.StatRemoved + " batches " + Sync.StatBatches + " resync " + Sync.StatResync + " errors " + Sync.StatErrors + " digests " + Sync.StatDigests + " digestfixes " + Sync.StatDigestFixes + " swept " + Sync.StatSwept);
                 foreach (var kv in Sync.RecreatedByType) Plugin.Log("[test]   recreated " + kv.Key + " x" + kv.Value);
+                return true;
+            });
+            // 15b. where I look: my idle character faces my cursor; the host turns it the same way (not to the host's cursor)
+            s.Add(el =>
+            {
+                if (Me().m_State != Farmer.State.None) return el > 10f;
+                return el > 1f;
+            });
+            s.Add(el =>
+            {
+                lookYaw = Me().transform.eulerAngles.y;   // wherever my cursor made me look
+                var r = Poll(el, "look", Sync.MyPlayerUID, x => Mathf.Abs(Mathf.DeltaAngle(x["y"].AsFloat, lookYaw)) < 6f, 12f);
+                if (r == null) return false;
+                TestBot.Assert("host: joiner's character faces where the joiner looks", r == true, (Reply != null ? Reply["y"].Value : "?") + " want " + lookYaw.ToString("F0"));
                 return true;
             });
             // 16. game speed: the host decides, the joiner follows and can't change it
@@ -1518,6 +1549,7 @@ namespace AutonautsCoop
                 bool ok = Coop.Role == Role.Off && TestBot.AtMainMenu() && Session.LastDisconnect != null;
                 if (!ok && el < 40f) return false;
                 TestBot.Assert("client: host left -> joiner back at the main menu with \"" + Session.EndedMsg + "\"", ok && Session.LastDisconnect == Session.EndedMsg, Session.LastDisconnect ?? "no message");
+                TestBot.Assert("client: old lobby forgotten, so I can host next", SteamNet.Lobby == Steamworks.CSteamID.Nil && SteamNet.HostId == 0);
                 return true;
             });
             // 25. load my own saved copy in single player: I play my character, nothing local leaked into it

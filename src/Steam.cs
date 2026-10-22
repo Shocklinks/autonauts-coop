@@ -411,6 +411,10 @@ namespace AutonautsCoop
                 }
             }
             catch { }
+            // Forget the old lobby: hosting later must create a new one (a joiner who lost the host and then
+            // hosted got the invite dialog of the lobby it had left, and nobody could join).
+            Lobby = CSteamID.Nil; HostId = 0; pendingLobby = 0;
+            Status = "";
         }
     }
 }

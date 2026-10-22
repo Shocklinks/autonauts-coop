@@ -199,7 +199,7 @@ namespace AutonautsCoop
             {
                 SteamNet.Pump();
                 if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); Shared.HostTick(); }
-                else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); Shared.ClientTick(); }
+                else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); Shared.ClientTick(); Look.ClientTick(); }
                 Session.Tick();   // after the inbox: a "lobby ended" message may sit right before the close
                 VersionCheck.Tick();
                 BugReport.Tick();

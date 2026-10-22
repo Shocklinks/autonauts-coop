@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.11.0 - 2026-10-21 - Created with Claude
+Version 0.12.0 - 2026-10-22 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -65,6 +65,7 @@ Commit as `Shocklinks <Shocklinks@users.noreply.github.com>`. Never use a real n
 | VersionCheck.cs | Refuse a joiner on a different mod/game version, with a reason |
 | Extras.cs | Joiner autosave/quicksave block; bug report zip |
 | Menu.cs | F8 window, toasts, "Host has ended the lobby." dialog |
+| Feel.cs | Joiner feel: real frame time for UI/camera (the sim clock is frozen), look-at-own-cursor, animators, buffered movement interpolation |
 | TestBot.cs, TestScript.cs, BigBase.cs, Multi.cs | Automated QA scenario (host/client bots), big-base stress test, three-player test |
 | test/protobot.py | A joiner that speaks the TCP protocol without the game (third player in COOP_MULTI; three game instances don't fit in sandbox memory) |
 
@@ -96,7 +97,7 @@ Running the tests:
 - Don't edit `src/` while a run is about to start its build.
 - Results are in `<work>/{host,client}/BepInEx/coop_test_*.txt` and `coop.log`.
 
-**Last results (0.11.0):** 102/102 TCP, 85/85 UDP, 15/15 three-player; big-base 7/7 (0.10.0).
+**Last results (0.12.0):** 106/106 TCP, 89/89 UDP, 15/15 three-player, 7/7 big-base.
 
 Sandbox limits:
 - Two medium-map game instances (about 3 GB each) get OOM-killed, so the big test uses a small map.

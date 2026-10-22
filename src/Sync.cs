@@ -398,6 +398,7 @@ namespace AutonautsCoop
             if (MenuActApply.HostApply((string)n["a"], n, fp)) return;
             if (KeyApply.HostApply((string)n["a"], n, fp)) return;
             if (Shared.HostApply((string)n["a"], n, fp)) return;
+            if (Look.HostApply((string)n["a"], n, fp)) return;
             switch ((string)n["a"])
             {
                 case "go":
@@ -502,6 +503,7 @@ namespace AutonautsCoop
                     if (targetPos.TryGetValue(uid, out var prev) && (prev - np).sqrMagnitude > 0.001f) movingUntil[uid] = Time.realtimeSinceStartup + 0.25f;
                     targetPos[uid] = np;
                     targetRot[uid] = a[4].AsFloat;
+                    Smooth.Add(uid, np, a[4].AsFloat);
                 }
             }
             finally { ObjectTypeList.m_Loading = false; Applying = false; }
@@ -592,6 +594,24 @@ namespace AutonautsCoop
             {
                 // Children (carried items, nests, contents) are rebuilt by the parent's Load; clear them first.
                 foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); touchedNested.Add(c); }
+                // Players and bots pick things up and put them down all the time. Rebuilding them each time made them
+                // hard to click and dropped the selection/editor on the joiner; reload the same object instead.
+                if (b && b is Farmer && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false))
+                {
+                    try
+                    {
+                        ClearHeld(b.GetComponent<Farmer>());
+                        ResetRuntime(b);
+                        if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
+                        b.GetComponent<Savable>().Load(o);
+                        b.GetComponent<Savable>().PostLoad();
+                        string got = Stable(b, SaveObject(b, out _));
+                        if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; StatNestedInPlace++; return; }
+                        LogDiff("nested " + (string)o["ID"], want, got);
+                    }
+                    catch (Exception e) { Plugin.Log("in-place nested load failed for " + o["ID"] + ": " + e.Message); }
+                    foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); }
+                }
                 if (b) { Destroy(b); StatRecreated++; Count("nested:" + (string)o["ID"]); }
                 else StatCreated++;
                 Create(o);
@@ -618,6 +638,14 @@ namespace AutonautsCoop
                 {
                     try
                     {
+                        if (b is Farmer)
+                        {
+                            // it put something down on the host: drop what our copy still holds before reloading
+                            var had = new List<int>(); CollectUIDs(SaveObject(b, out _), uid, had);
+                            foreach (var c in had) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); }
+                            ClearHeld(b.GetComponent<Farmer>());
+                        }
+                        ResetRuntime(b);
                         // Savable.Load re-registers the UID (ChangeActionable); unregister first or it allocates a new one.
                         if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
                         b.GetComponent<Savable>().Load(o);
@@ -634,6 +662,48 @@ namespace AutonautsCoop
             }
             else StatCreated++;
             Create(o);
+        }
+
+        public static int StatNestedInPlace;
+
+        /// Empty a farmer's hands, pockets, upgrades and clothes lists (their objects were destroyed just before)
+        /// so its Load can fill them from the host's JSON without duplicates.
+        static void ClearHeld(Farmer f)
+        {
+            if (!f) return;
+            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => !x || x.m_UniqueID == -1); } catch { }
+            foreach (var comp in new Component[] { f.m_FarmerInventory, f.GetComponent<FarmerUpgrades>(), f.GetComponent<FarmerClothes>() })
+            {
+                if (!comp) continue;
+                foreach (var fld in comp.GetType().GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                {
+                    if (fld.FieldType == typeof(List<Holdable>))
+                    {
+                        var l = fld.GetValue(comp) as List<Holdable>;
+                        l?.RemoveAll(x => !x || x.m_UniqueID == -1);
+                    }
+                    else if (fld.FieldType == typeof(Holdable[]))
+                    {
+                        var a = fld.GetValue(comp) as Holdable[];
+                        if (a != null) for (int i = 0; i < a.Length; i++) if (!a[i] || a[i].m_UniqueID == -1) a[i] = null;
+                    }
+                }
+            }
+        }
+
+        /// Load only adds a bot's running script, fail-jump stack and instructions; clear them so a reload replaces them.
+        static void ResetRuntime(BaseClass b)
+        {
+            var w = b as Worker;
+            if (!w || w.m_WorkerInterpreter == null) return;
+            try
+            {
+                var t = Traverse.Create(w.m_WorkerInterpreter);
+                t.Field("m_CurrentScript").SetValue(null);
+                t.Field("m_FailJumpStack").GetValue<System.Collections.IList>()?.Clear();
+                w.m_WorkerInterpreter.m_HighInstructions.m_List.Clear();
+            }
+            catch (Exception e) { Plugin.Log("reset bot runtime: " + e.Message); }
         }
 
         static readonly HashSet<string> diffLogged = new HashSet<string>();
@@ -752,15 +822,17 @@ namespace AutonautsCoop
                 var b = ObjectTypeList.Instance.GetObjectFromUniqueID(kv.Key, false);
                 if (!b) { drop.Add(kv.Key); continue; }
                 var t = b.transform;
-                if (!basePos.TryGetValue(kv.Key, out var bp)) bp = t.position;
-                bp = (bp - kv.Value).sqrMagnitude > 25f ? kv.Value : Vector3.Lerp(bp, kv.Value, k);
+                // play movement back a fixed moment behind the host, between the two samples around that time:
+                // steady motion even when packets arrive in bursts (internet / Steam relay)
+                if (!Smooth.Sample(kv.Key, out var bp, out float ry, out bool walking)) { bp = kv.Value; ry = targetRot.TryGetValue(kv.Key, out var r0) ? r0 : t.eulerAngles.y; walking = false; }
                 basePos[kv.Key] = bp;
-                bool walking = movingUntil.TryGetValue(kv.Key, out float mu) && Time.realtimeSinceStartup < mu;
                 t.position = walking ? bp + Vector3.up * Anim.Hop(b, Time.realtimeSinceStartup) : bp;
-                if (targetRot.TryGetValue(kv.Key, out float ry))
-                    t.rotation = Quaternion.Slerp(t.rotation, Quaternion.Euler(0, ry, 0), k);
+                // my own idle character faces my cursor (local); everyone else faces where the host says
+                var f = b as Farmer;
+                bool mineIdle = kv.Key == MyPlayerUID && f && f.m_State == Farmer.State.None;
+                if (!mineIdle) t.rotation = Quaternion.Slerp(t.rotation, Quaternion.Euler(0, ry, 0), Mathf.Clamp01(Time.unscaledDeltaTime * 20f));
             }
-            foreach (var d in drop) { targetPos.Remove(d); targetRot.Remove(d); basePos.Remove(d); movingUntil.Remove(d); }
+            foreach (var d in drop) { targetPos.Remove(d); targetRot.Remove(d); basePos.Remove(d); movingUntil.Remove(d); Smooth.Forget(d); }
         }
 
         public static void ClientSendGo(TileCoord dest, Actionable target, AFO.AT type)

@@ -3,9 +3,9 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.11.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 102/102 over TCP, 85/85 over the Steam-style wire, 15/15 three-player, 7/7 big-base stress test)
+## What works (automated two-instance test: 106/106 over TCP, 89/89 over the Steam-style wire, 15/15 three-player, 7/7 big-base stress test)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
@@ -55,6 +55,19 @@ Status: **alpha 0.11.0**. Not affiliated with Denki or Curve Games. Contains no 
 - Self-healing: every 10 s the host sends a (uid, hash) digest; the joiner re-requests anything that drifted.
 - Big bases: change detection is incremental (moving things every scan, the rest within ~5 s), so scan cost grows
   slowly with base size. Stress test: 8,000 objects with 400 bots and 4,000 items — join in ~70 s, world matches.
+
+## Fixed after the first real Steam test (0.12.0)
+
+- Joiner camera: WASD/arrow pan, keyboard rotate and zoom work (they counted time with the joiner's frozen game clock).
+- Joiner bot programming: the editor's "stop the bot first" cover no longer stays up forever; selection rings,
+  flashes and other UI timers run.
+- Joiners' characters no longer turn to follow the host's mouse (and the other way round): each player's character
+  faces their own cursor.
+- Smoother movement: the joiner plays movement back slightly behind the host and interpolates between updates, so
+  bursty internet packets don't make characters and bots stutter. Farmer, folk and pet animations keep playing.
+- Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
+  clickable and selected on the joiner (many busy bots were hard to click before).
+- A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
 
 ## Not done / known issues
 
