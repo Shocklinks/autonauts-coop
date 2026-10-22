@@ -28,6 +28,7 @@ WHAT JOINERS CAN DO
   and comes back when you rejoin - next to the host if something was built where you stood. Survives host save/reload.
 - Bot groups: create, rename, recolour, delete; group Play/Stop/Pause/Drop/Call.
 - Notices when players join or leave. "Host has ended the lobby." when the host stops.
+- More than 2 players work. Joining by IP without Steam? Set your name in F8 first.
 - Joiners don't autosave. Save As keeps your own copy of the world.
 - Both players need the same AutonautsCoop version; a mismatch is refused with a message.
 - Research, building unlocks, resources, time of day and wardrobe contents follow the host live.

@@ -67,7 +67,7 @@ namespace AutonautsCoop
         static Building BuildingAt(TileCoord t) { var tile = TileManager.Instance.GetTile(t); return tile != null && tile.m_Building ? tile.m_Building : null; }
         static Building FloorAt(TileCoord t) { var tile = TileManager.Instance.GetTile(t); return tile != null && tile.m_Floor ? tile.m_Floor : null; }
         /// A buildable-looking tile near c: in bounds, not solid, no building or floor.
-        static TileCoord EmptyTile(TileCoord c)
+        public static TileCoord EmptyTile(TileCoord c)
         {
             for (int r = 0; r < 12; r++)
                 for (int dy = -r; dy <= r; dy++)
@@ -225,6 +225,13 @@ namespace AutonautsCoop
                     var st = new JSONObject(); st["type"] = ObjectTypeList.Instance.GetSaveNameFromIdentifier(pick); st["count"] = QuestManager.Instance.m_BuildingsLocked.Count;
                     var r = new JSONObject(); r["unlock"] = st; from.Send(Msg.Info, r.ToString());
                     Plugin.Log("[test] unlocked building " + pick);
+                    return true;
+                }
+                case "test_unlock":
+                {
+                    var t = ObjectTypeList.Instance.GetIdentifierFromSaveName(n["type"], false);
+                    if (t != ObjectTypeList.m_Total) QuestManager.Instance.UnlockObject(t);
+                    Plugin.Log("[test] unlocked " + t);
                     return true;
                 }
                 case "test_wardrobe":
@@ -397,6 +404,7 @@ namespace AutonautsCoop
             return null;
         }
         static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
+        static ObjectType paletteType = ObjectTypeList.m_Total;
         static int groupId = -1, copyPlayer = -1, copyObjs = -1, autosBefore = -1, relocAtLeave = -1; static TileCoord undoTile, leaveTile, reloadTile; static float leaveAt;
         static WorkerGroup G(int id) => WorkerGroupManager.Instance.GetGroupFromID(id);
         static bool HasName(JSONNode arr, string name) { foreach (JSONNode x in arr.AsArray) if (((string)x).StartsWith(name)) return true; return false; }
@@ -947,6 +955,30 @@ namespace AutonautsCoop
                 bool ok = t != ObjectTypeList.m_Total && !QuestManager.Instance.m_BuildingsLocked.ContainsKey(t) && QuestManager.Instance.m_BuildingsLocked.Count == UnlockReply["count"].AsInt;
                 if (!ok && el < 15f) return false;
                 TestBot.Assert("client: building unlocked on the host shows as unlocked for the joiner", ok, (string)UnlockReply["type"] + " client locked " + QuestManager.Instance.m_BuildingsLocked.Count + " host " + UnlockReply["count"].AsInt);
+                return true;
+            });
+            // 12b. an unlock arriving while the joiner has edit mode open shows up without reopening it
+            s.Add(el => { GameStateManager.Instance.SetState(GameStateManager.State.Edit); return true; });
+            s.Add(el =>
+            {
+                if (el < 1.5f) return false;
+                var pal = GameStateEdit.Instance ? GameStateEdit.Instance.m_BuildingPalette : null;
+                var infos = pal ? Traverse.Create(pal).Field("m_CategoryInfo").GetValue<List<BuildingCategoryInfo>>() : null;
+                paletteType = ObjectTypeList.m_Total;
+                if (infos != null) foreach (var info in infos) { for (int j = 0; j < info.m_Buildings.Count && paletteType == ObjectTypeList.m_Total; j++) if (info.m_Locked[j]) paletteType = info.m_Buildings[j]; }
+                if (paletteType == ObjectTypeList.m_Total) { TestBot.Assert("client: a locked building in the palette", false); return true; }
+                HostReq("test_unlock", n => n["type"] = ObjectTypeList.Instance.GetSaveNameFromIdentifier(paletteType));
+                return true;
+            });
+            s.Add(el =>
+            {
+                var pal = GameStateEdit.Instance ? GameStateEdit.Instance.m_BuildingPalette : null;
+                bool ok = false;
+                var infos = pal ? Traverse.Create(pal).Field("m_CategoryInfo").GetValue<List<BuildingCategoryInfo>>() : null;
+                if (infos != null) foreach (var info in infos) { int j = info.m_Buildings.IndexOf(paletteType); if (j >= 0 && !info.m_Locked[j]) ok = true; }
+                if (!ok && el < 15f) return false;
+                TestBot.Assert("client: unlock shows in the open build palette (no reopen)", ok && GameStateManager.Instance.GetActualState() == GameStateManager.State.Edit, paletteType + " refreshes " + WorldState.PaletteRefreshes);
+                GameStateManager.Instance.SetState(GameStateManager.State.Normal);
                 return true;
             });
             // 13. wardrobe: engage it (screen opens on the joiner, not the host), put on a hat from it, close

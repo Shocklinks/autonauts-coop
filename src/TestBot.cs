@@ -49,7 +49,8 @@ namespace AutonautsCoop
                 t0 = Time.realtimeSinceStartup;
                 resultPath = Path.Combine(Paths.BepInExRootPath, "coop_test_" + Mode + ".txt");
                 File.WriteAllText(resultPath, "");
-                if (Big) { if (Mode == "host") BigBase.BuildHost(steps); else BigBase.BuildClient(steps); }
+                if (Multi.On) { if (Mode == "host") Multi.BuildHost(steps); else Multi.BuildClient(steps); }
+                else if (Big) { if (Mode == "host") BigBase.BuildHost(steps); else BigBase.BuildClient(steps); }
                 else if (Mode == "host") TestScript.BuildHost(steps); else TestScript.BuildClient(steps);
                 stepT = Time.realtimeSinceStartup;
             }

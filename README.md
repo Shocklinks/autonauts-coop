@@ -3,9 +3,9 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.10.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.11.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 101/101 over TCP, 84/84 over the Steam-style wire, 7/7 big-base stress test)
+## What works (automated two-instance test: 102/102 over TCP, 85/85 over the Steam-style wire, 15/15 three-player, 7/7 big-base stress test)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
@@ -35,6 +35,8 @@ Status: **alpha 0.10.0**. Not affiliated with Denki or Curve Games. Contains no 
 - Bot groups: joiners create, rename, recolour, nest and delete groups and move bots between them; group Play, Stop,
   Pause, Drop and Call run on the host (Call brings the bots to the joiner who pressed it).
 - "X joined the game" / "X left the game" notices for everyone.
+- Three or more players: tested with the host plus two joiners. Joiners with the same name (e.g. "player" on IP
+  without Steam) get "player (2)" so their stored characters never mix. Set your name in F8 (empty = Steam name).
 - If the host ends the session (quits, goes back to its menu, stops hosting), joiners see "Host has ended the
   lobby." and return to the main menu; if the connection drops it says "(connection lost)".
 - Animations on the joiner: farmers' actions (chop, dig, idle...) are mirrored from the host; walking hops are
@@ -58,7 +60,6 @@ Status: **alpha 0.10.0**. Not affiliated with Denki or Curve Games. Contains no 
 
 - Planning areas sync when the editor leaves planning mode (and while drawing); two people editing areas at the
   same moment: last one wins.
-- An unlock that lands while a joiner has edit mode open shows after they reopen edit mode.
 - Steam invites are written but **not yet tested on real Steam** (needs two PCs, two accounts that each own the game).
 - Joiners on 0.7.0 or older can't get the version message from a 0.8.0+ host (they just get disconnected).
 - Not tested over the internet. The big-base test ran on a small map (two medium maps didn't fit this test
@@ -104,7 +105,7 @@ player download (BepInEx + plugin + README-COOP.txt, extracts into the game fold
 `test/run.sh "<game dir>" "<BepInEx dir>" <work dir>` copies the game into two folders, runs both under Wine + Xvfb
 with separate prefixes, and drives them with in-game bots (`COOP_TEST=host|client`) through the real input path.
 Results: `<work dir>/{host,client}/BepInEx/coop_test_*.txt`. Add `COOP_TRANSPORT=udp` to test the Steam framing path,
-or `COOP_BIG=1` for the big-base stress test (`COOP_BIG_BOTS`, `COOP_BIG_BUILDINGS`, `COOP_BIG_ITEMS` set its size).
+`COOP_MULTI=1` for the three-player test (host + game joiner + `test/protobot.py`), or `COOP_BIG=1` for the big-base stress test (`COOP_BIG_BOTS`, `COOP_BIG_BUILDINGS`, `COOP_BIG_ITEMS` set its size).
 
 The test copies get a `steam_appid.txt` so they start without the Steam client. Test use only; never ship it.
 

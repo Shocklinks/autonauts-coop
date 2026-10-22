@@ -20,21 +20,39 @@ namespace AutonautsCoop
         public static int Applied;   // client stats
         static JSONNode lastLocked;
 
-        /// If the joiner has the build menu open, rebuild it so new unlocks show up right away.
-        static void RefreshPalette()
+        /// If the joiner has the build menu open, update it so new unlocks show up right away (the palette caches
+        /// each building's locked flag when edit mode opens). Also flag newly unlocked buildings as "new".
+        public static void RefreshPalette(ICollection<ObjectType> newlyUnlocked)
         {
             try
             {
+                if (newlyUnlocked != null) foreach (var t in newlyUnlocked) { try { BuildingPalette.AddNewUnlocked(t); } catch { } }
                 var ed = GameStateEdit.Instance;
-                if (ed == null) return;
-                var pal = Traverse.Create(ed).Field("m_BuildingPalette").GetValue();
+                var pal = ed ? ed.m_BuildingPalette : null;
                 if (pal == null) return;
-                var t = Traverse.Create(pal);
-                foreach (var m in new[] { "UpdateCategories", "UpdateBuildings", "Refresh", "UpdateBuiltCounts" })
-                    if (t.Method(m).MethodExists()) { t.Method(m).GetValue(); }
+                var tp = Traverse.Create(pal);
+                var infos = tp.Field("m_CategoryInfo").GetValue<List<BuildingCategoryInfo>>();
+                if (infos == null) return;
+                bool changed = false;
+                foreach (var info in infos)
+                    for (int j = 0; j < info.m_Buildings.Count; j++)
+                    {
+                        bool locked = QuestManager.Instance.m_BuildingsLocked.ContainsKey(info.m_Buildings[j]);
+                        if (info.m_Locked[j] != locked) { info.m_Locked[j] = locked; changed = true; }
+                    }
+                if (!changed) return;
+                var cats = tp.Field("m_CategoryButtons").GetValue<List<BuildingCategoryButton>>();
+                if (cats != null) foreach (var c in cats) if (c) UnityEngine.Object.Destroy(c.gameObject);
+                pal.CreateCategoryButtons();
+                tp.Method("DeleteBuildingButtons").GetValue();
+                tp.Method("CreateBuildingButtons").GetValue();
+                PaletteRefreshes++;
+                Plugin.Log("build palette refreshed for new unlocks");
             }
             catch (Exception e) { Plugin.Log("palette refresh: " + e.Message); }
         }
+        public static int PaletteRefreshes;
+        static HashSet<ObjectType> prevLocked;
 
         static JSONNode SaveSection(string s)
         {
@@ -66,7 +84,7 @@ namespace AutonautsCoop
             return n;
         }
 
-        public static void ResetSent() { sent.Clear(); next = 0; }
+        public static void ResetSent() { sent.Clear(); next = 0; prevLocked = null; }
 
         public static void HostTick(bool force = false)
         {
@@ -123,7 +141,11 @@ namespace AutonautsCoop
                                         if (t != ObjectTypeList.m_Total && !bd.ContainsKey(t)) bd.Add(t, e[1].AsInt);
                                     }
                                 }
-                                RefreshPalette();
+                                // newly unlocked = locked at the last apply, not now (a Quest load in between resets the table)
+                                var opened = new List<ObjectType>();
+                                if (prevLocked != null) foreach (var t in prevLocked) if (!QuestManager.Instance.m_BuildingsLocked.ContainsKey(t)) opened.Add(t);
+                                prevLocked = new HashSet<ObjectType>(QuestManager.Instance.m_BuildingsLocked.Keys);
+                                RefreshPalette(opened);
                                 break;
                             }
                             case "Resources": ResourceManager.Instance.Load(n); break;

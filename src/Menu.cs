@@ -15,13 +15,18 @@ namespace AutonautsCoop
         ConfigEntry<string> cfgIp;
         ConfigEntry<int> cfgPort;
         ConfigEntry<KeyCode> cfgKey;
+        static ConfigEntry<string> cfgName;
+        string nameField = "";
+        /// Name other players see; empty = Steam name (or "player" without Steam).
+        public static string PlayerName => cfgName != null ? cfgName.Value.Trim() : "";
 
         void Start()
         {
             cfgIp = Plugin.Instance.Config.Bind("Network", "LastJoinIP", "127.0.0.1", "Last IP joined");
             cfgPort = Plugin.Instance.Config.Bind("Network", "Port", 27015, "TCP port to host on / join");
             cfgKey = Plugin.Instance.Config.Bind("UI", "MenuKey", KeyCode.F8, "Key that opens the co-op window");
-            ip = cfgIp.Value; port = cfgPort.Value.ToString();
+            cfgName = Plugin.Instance.Config.Bind("Player", "Name", "", "Name other players see (empty = your Steam name). Needed for joining by IP without Steam.");
+            ip = cfgIp.Value; port = cfgPort.Value.ToString(); nameField = cfgName.Value;
         }
 
         void Update()
@@ -78,6 +83,9 @@ namespace AutonautsCoop
             GUILayout.BeginVertical();
             if (Coop.Role == Role.Off)
             {
+                GUILayout.Label("Your name (empty = Steam name)");
+                string nf = GUILayout.TextField(nameField, 24);
+                if (nf != nameField) { nameField = nf; cfgName.Value = nf.Trim(); }
                 GUILayout.Label("Port");
                 port = GUILayout.TextField(port, 6);
                 bool inGame = Coop.InGame();

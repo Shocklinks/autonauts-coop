@@ -78,7 +78,7 @@ namespace AutonautsCoop
                         if (p.From.Name != "?" || VersionCheck.IsRefused(p.From)) break;   // duplicate hello (connectionless wire)
                         string why = VersionCheck.Check(hello);
                         if (why != null) { VersionCheck.Reject(p.From, (string)hello["name"], why); break; }
-                        p.From.Name = hello["name"];
+                        p.From.Name = UniqueName((string)hello["name"], p.From);
                         SendSnapshot(p.From);
                         break;
                     case Msg.Input:
@@ -86,6 +86,17 @@ namespace AutonautsCoop
                         break;
                 }
             }
+        }
+
+        /// Two joiners with the same name (e.g. both "player" on IP) must not share a stored character.
+        string UniqueName(string want, Peer self)
+        {
+            want = string.IsNullOrEmpty(want) ? "player" : want.Trim();
+            if (want.Length > 32) want = want.Substring(0, 32);
+            var taken = new HashSet<string>();
+            lock (Host.Peers) foreach (var q in Host.Peers) if (q != self && q.Alive && q.Name != "?") taken.Add(q.Name);
+            if (!taken.Contains(want)) return want;
+            for (int i = 2; ; i++) { var n = want + " (" + i + ")"; if (!taken.Contains(n)) { Plugin.Log("name " + want + " is taken; using " + n); return n; } }
         }
 
         void SendSnapshot(Peer peer)

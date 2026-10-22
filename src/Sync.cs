@@ -366,6 +366,7 @@ namespace AutonautsCoop
                 return;
             }
             if (TestBot.Active && BigBase.HostOp((string)n0["a"], n0, from)) return;
+            if (TestBot.Active && Multi.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && TestScript.HostTestOp((string)n0["a"], n0, from)) return;
             if ((string)n0["a"] == "test_hostlock" && TestBot.Active)
             {

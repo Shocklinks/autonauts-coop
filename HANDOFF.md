@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.10.0 - 2026-10-21 - Created with Claude
+Version 0.11.0 - 2026-10-21 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -65,7 +65,8 @@ Commit as `Shocklinks <Shocklinks@users.noreply.github.com>`. Never use a real n
 | VersionCheck.cs | Refuse a joiner on a different mod/game version, with a reason |
 | Extras.cs | Joiner autosave/quicksave block; bug report zip |
 | Menu.cs | F8 window, toasts, "Host has ended the lobby." dialog |
-| TestBot.cs, TestScript.cs, BigBase.cs | Automated QA scenario (host/client bots) and big-base stress test |
+| TestBot.cs, TestScript.cs, BigBase.cs, Multi.cs | Automated QA scenario (host/client bots), big-base stress test, three-player test |
+| test/protobot.py | A joiner that speaks the TCP protocol without the game (third player in COOP_MULTI; three game instances don't fit in sandbox memory) |
 
 ## Environment setup (cloud sandbox, Linux)
 
@@ -86,6 +87,7 @@ Commit as `Shocklinks <Shocklinks@users.noreply.github.com>`. Never use a real n
 ./test/run.sh "<game copy>" "<BepInEx>" <work dir> 2400              # TCP suite
 COOP_TRANSPORT=udp ./test/run.sh "<game copy>" "<BepInEx>" <work> 2400  # Steam framing over UDP stand-in
 COOP_BIG=1 ./test/run.sh "<game copy>" "<BepInEx>" <work> 1800      # big-base stress test (small map)
+COOP_MULTI=1 ./test/run.sh "<game copy>" "<BepInEx>" <work> 1500    # 3 players: host + game joiner + test/protobot.py
 ./tools/package.sh "<BepInEx>" out/AutonautsCoop.dll 0.10.0 AutonautsCoop-0.10.0.zip   # player download
 ```
 
@@ -94,7 +96,7 @@ Running the tests:
 - Don't edit `src/` while a run is about to start its build.
 - Results are in `<work>/{host,client}/BepInEx/coop_test_*.txt` and `coop.log`.
 
-**Last results (0.10.0):** 101/101 TCP, 84/84 UDP, 7/7 big-base.
+**Last results (0.11.0):** 102/102 TCP, 85/85 UDP, 15/15 three-player; big-base 7/7 (0.10.0).
 
 Sandbox limits:
 - Two medium-map game instances (about 3 GB each) get OOM-killed, so the big test uses a small map.
@@ -115,7 +117,5 @@ Sandbox limits:
 
 1. A real Steam session between two PCs. Collect the F8 bug report zip from both sides.
 2. Real medium/large late-game saves: join time, host frame cost.
-3. Three or more players at once (only one joiner tested so far).
-4. Rough edges:
-   - An unlock that arrives while a joiner has edit mode open shows only after they reopen it.
-   - Shared editors (library, planning, groups) are last-write-wins.
+3. Three or more real game clients at once (tested: host + one game joiner + the protocol bot).
+4. Rough edge: shared editors (library, planning, groups) are last-write-wins.

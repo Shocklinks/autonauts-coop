@@ -216,6 +216,9 @@ namespace AutonautsCoop
 
         public static string MyName()
         {
+            var env = Environment.GetEnvironmentVariable("COOP_NAME");   // tests: several joiners on one machine
+            if (!string.IsNullOrEmpty(env)) return env;
+            if (!string.IsNullOrEmpty(Menu.PlayerName)) return Menu.PlayerName;
             try { if (SteamReady) return SteamFriends.GetPersonaName(); } catch { }
             return "player";
         }
