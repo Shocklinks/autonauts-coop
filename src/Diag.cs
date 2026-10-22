@@ -169,7 +169,7 @@ namespace AutonautsCoop
         }
 
         // ---------------- per frame ----------------
-        static float nextSummary, frameSum, frameMax; static int frames;
+        static float nextSummary, frameSum, frameMax, gcWorst, plainWorst; static int frames, gcs, gcLast;
         static int lastSelectTarget = -2; static GameStateManager.State lastState = GameStateManager.State.Total;
         static long bytesIn0, bytesOut0; static int moverSaves0, moverSkips0; static int batches0, recreated0, inplace0; static double apply0;
 
@@ -177,6 +177,10 @@ namespace AutonautsCoop
         {
             float dt = Time.unscaledDeltaTime;
             frames++; frameSum += dt; if (dt > frameMax) frameMax = dt;
+            // garbage collection pauses: a frame in which the collector ran
+            int gcNow = GC.CollectionCount(0);
+            if (gcNow != gcLast) { gcs += gcNow - gcLast; gcLast = gcNow; if (dt > gcWorst) gcWorst = dt; }
+            else if (dt > plainWorst) plainWorst = dt;
             if (Coop.Role == Role.Off) { nextSummary = 0; return; }
             if (!On) return;
             bool inGame = Coop.InGame();
@@ -241,6 +245,8 @@ namespace AutonautsCoop
         {
             float fps = frameSum > 0 ? frames / frameSum : 0;
             var sb = new StringBuilder("stats 10s: fps ").Append(fps.ToString("F0")).Append(" worst frame ").Append((frameMax * 1000).ToString("F0")).Append(" ms");
+            sb.Append(" (GC ").Append(gcs).Append("x, worst GC frame ").Append((gcWorst * 1000).ToString("F0")).Append(" ms, worst other ").Append((plainWorst * 1000).ToString("F0")).Append(" ms, heap ").Append((GC.GetTotalMemory(false) / 1048576).ToString()).Append(" MB)");
+            gcs = 0; gcWorst = 0; plainWorst = 0;
             sb.Append(" | in ").Append(((Peer.BytesRecv - bytesIn0) / 10240f).ToString("F1")).Append(" KB/s out ").Append(((Peer.BytesSent - bytesOut0) / 10240f).ToString("F1")).Append(" KB/s");
             if (Coop.Role == Role.Client)
             {
@@ -266,6 +272,7 @@ namespace AutonautsCoop
                 lock (Coop.I.Host.Peers)
                     foreach (var p in Coop.I.Host.Peers)
                         if (p.Alive && p.Name != "?") sb.Append(" | ").Append(p.Name).Append(" rtt ").Append(p.Rtt >= 0 ? (p.Rtt * 1000).ToString("F0") + " ms" : "?");
+                var pr = Prof.TakeReport(); if (pr.Length > 0) sb.Append(" | time: ").Append(pr);
             }
             Log(sb.ToString());
         }
@@ -358,6 +365,38 @@ namespace AutonautsCoop
             if (!Diag.Faked) return true;
             __result = __instance.TestCollisionOffset(out CollisionPoint, TestTiles, TestBuildings, TestWorkers, TestMisc, TestWorkersDead, Diag.Mouse);
             return false;
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    /// Where the host's time goes: per named part, the worst single run and the total over the last 10 s
+    /// (in the diagnostics "stats" line).
+    public static class Prof
+    {
+        class P { public double Max, Sum; public int N; }
+        static readonly Dictionary<string, P> parts = new Dictionary<string, P>();
+        static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        public static double Now => clock.Elapsed.TotalMilliseconds;
+        public static void Add(string name, double ms)
+        {
+            if (!parts.TryGetValue(name, out var p)) parts[name] = p = new P();
+            p.N++; p.Sum += ms; if (ms > p.Max) p.Max = ms;
+        }
+        public static string TakeReport()
+        {
+            var list = new List<KeyValuePair<string, P>>(parts);
+            list.Sort((a, b) => b.Value.Max.CompareTo(a.Value.Max));
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in list)
+            {
+                if (kv.Value.Max < 1) continue;
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(kv.Key).Append(" worst ").Append(kv.Value.Max.ToString("F0")).Append(" ms (").Append(kv.Value.N).Append("x, ").Append(kv.Value.Sum.ToString("F0")).Append(" ms)");
+            }
+            parts.Clear();
+            return sb.ToString();
         }
     }
 }

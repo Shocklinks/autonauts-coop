@@ -98,6 +98,7 @@ namespace AutonautsCoop
 
         // ---------------- host ----------------
         static readonly Dictionary<int, int> sentHash = new Dictionary<int, int>();
+        static readonly List<string> upText = new List<string>();
         static readonly Dictionary<int, Vector3> sentPos = new Dictionary<int, Vector3>();
         static readonly List<int[]> tileQ = new List<int[]>();
         static readonly List<int> plotQ = new List<int>();
@@ -213,27 +214,26 @@ namespace AutonautsCoop
             float now = Time.realtimeSinceStartup;
             JSONObject msg = null;
 
+            double t0 = Prof.Now;
             if (now >= nextScan)
             {
                 nextScan = now + ScanEvery;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 msg = new JSONObject();
-                var up = new JSONArray(); var rm = new JSONArray();
+                var rm = new JSONArray();
                 var seen = new HashSet<int>();
                 Scan.Step(true);
+                Prof.Add("scan", sw.Elapsed.TotalMilliseconds);
+                // changed objects go out as their saved JSON text (no parse/re-serialize)
+                upText.Clear();
                 foreach (var kv in Scan.TopLevel())
                 {
                     seen.Add(kv.Key);
-                    if (!sentHash.TryGetValue(kv.Key, out int old) || old != kv.Value.Hash)
-                    {
-                        sentHash[kv.Key] = kv.Value.Hash;
-                        up.Add(JSON.Parse(kv.Value.Json));
-                    }
+                    if (!sentHash.TryGetValue(kv.Key, out int old) || old != kv.Value.Hash) { sentHash[kv.Key] = kv.Value.Hash; upText.Add(kv.Value.Json); }
                 }
                 var gone = new List<int>();
                 foreach (var uid in sentHash.Keys) if (!seen.Contains(uid)) gone.Add(uid);
                 foreach (var uid in gone) { sentHash.Remove(uid); sentPos.Remove(uid); rm.Add(uid); }
-                if (up.Count > 0) msg["up"] = up;
                 if (rm.Count > 0) msg["rm"] = rm;
                 if (tileQ.Count > 0)
                 {
@@ -247,7 +247,9 @@ namespace AutonautsCoop
                     msg["pv"] = pv; plotQ.Clear();
                 }
                 LastScanMs = sw.Elapsed.TotalMilliseconds;
+                Prof.Add("changes", LastScanMs);
             }
+            double t1 = Prof.Now;
 
             if (now >= nextMove)
             {
@@ -272,19 +274,31 @@ namespace AutonautsCoop
                 if (an != null) { if (msg == null) msg = new JSONObject(); msg["an"] = an; }
             }
 
-            if (msg != null && msg.Count > 0)
-                Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(msg.ToString()));
+            double t2 = Prof.Now; Prof.Add("movement", t2 - t1);
+            if (((msg != null && msg.Count > 0) || upText.Count > 0) && !Coop.I.Host.AnyRecipient()) upText.Clear();   // nobody to tell (snapshot time)
+            else if ((msg != null && msg.Count > 0) || upText.Count > 0)
+            {
+                string body = msg != null ? msg.ToString() : "{}";
+                if (upText.Count > 0) body = "{\"up\":[" + string.Join(",", upText.ToArray()) + "]" + (body.Length > 2 ? "," + body.Substring(1) : "}");
+                upText.Clear();
+                Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(body));
+            }
+            double t3 = Prof.Now; Prof.Add("pack+send", t3 - t2);
             WorldState.HostTick();
+            double t4 = Prof.Now; Prof.Add("world sections", t4 - t3);
 
             if (now >= nextDigest)
             {
+                var swd = System.Diagnostics.Stopwatch.StartNew();
                 // Anti-entropy: the list of (uid, hash) the clients should have. They ask for what's off.
                 nextDigest = now + DigestEvery;
-                var d = new JSONObject(); var u = new JSONArray();
-                foreach (var kv in sentHash) { u.Add(kv.Key); u.Add(kv.Value); }
-                d["ae"] = u;
-                Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(d.ToString()));
+                var sb = new StringBuilder("{\"ae\":[", sentHash.Count * 16); bool first = true;
+                foreach (var kv in sentHash) { if (!first) sb.Append(','); first = false; sb.Append(kv.Key).Append(',').Append(kv.Value); }
+                sb.Append("]}");
+                Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(sb.ToString()));
+                Prof.Add("digest", swd.Elapsed.TotalMilliseconds);
             }
+            Prof.Add("host sync total", Prof.Now - t0);
         }
 
         class PendingGo { public string Json; public Peer From; public float Until; }
@@ -742,7 +756,8 @@ namespace AutonautsCoop
                         {
                             // it put something down on the host: drop what our copy still holds before reloading
                             var had = new List<int>(); CollectUIDs(SaveObject(b, out _), uid, had);
-                            foreach (var c in had) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); }
+                            // only what our copy still really holds: the same UID may already be in someone else's hands (applied first)
+                            foreach (var c in had) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (!cb || cb == b) continue; var hold = cb.transform.parent ? cb.transform.parent.GetComponentInParent<Farmer>() : null; if (hold && hold != b) continue; Destroy(cb); }
                             ClearHeld(b.GetComponent<Farmer>());
                         }
                         ResetRuntime(b);
@@ -802,10 +817,18 @@ namespace AutonautsCoop
 
         /// Empty a farmer's hands, pockets, upgrades and clothes lists (their objects were destroyed just before)
         /// so its Load can fill them from the host's JSON without duplicates.
+        /// Not (or no longer) held by f: destroyed, or now in someone else's hands (another update, or the joiner's
+        /// own screen, moved it first).
+        static bool NotHeldBy(Holdable x, Farmer f)
+        {
+            if (!x || x.m_UniqueID == -1) return true;
+            var hold = x.transform.parent ? x.transform.parent.GetComponentInParent<Farmer>() : null;   // (upgrades like a backpack hold items too: only another farmer counts)
+            return hold && hold != f;
+        }
         static void ClearHeld(Farmer f)
         {
             if (!f) return;
-            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => !x || x.m_UniqueID == -1); } catch { }
+            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => NotHeldBy(x, f)); } catch { }
             foreach (var comp in new Component[] { f.m_FarmerInventory, f.GetComponent<FarmerUpgrades>(), f.GetComponent<FarmerClothes>() })
             {
                 if (!comp) continue;
@@ -814,12 +837,12 @@ namespace AutonautsCoop
                     if (fld.FieldType == typeof(List<Holdable>))
                     {
                         var l = fld.GetValue(comp) as List<Holdable>;
-                        l?.RemoveAll(x => !x || x.m_UniqueID == -1);
+                        l?.RemoveAll(x => NotHeldBy(x, f));
                     }
                     else if (fld.FieldType == typeof(Holdable[]))
                     {
                         var a = fld.GetValue(comp) as Holdable[];
-                        if (a != null) for (int i = 0; i < a.Length; i++) if (!a[i] || a[i].m_UniqueID == -1) a[i] = null;
+                        if (a != null) for (int i = 0; i < a.Length; i++) if (a[i] != null && NotHeldBy(a[i], f)) a[i] = null;
                     }
                 }
             }
@@ -1128,6 +1151,33 @@ namespace AutonautsCoop
             if (__state < 0) return;
             localNext = Counter.GetValue<int>();
             Counter.SetValue(__state);
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Host: new objects (and ones that got a new UID) are looked at right away, not when the spread-out walk gets there.
+
+}
+
+namespace AutonautsCoop
+{
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: an old copy being destroyed must not unregister its UID from the new copy that already took it.
+    [HarmonyLib.HarmonyPatch(typeof(ObjectTypeList), nameof(ObjectTypeList.RemoveActionable))]
+    static class P_ClientRemoveOnlyOwn
+    {
+        static System.Collections.Generic.Dictionary<int, BaseClass> list;
+        static bool Prefix(BaseClass NewBaseClass)
+        {
+            if (Coop.Role != Role.Client || (object)NewBaseClass == null) return true;
+            if (list == null) list = HarmonyLib.Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDList").GetValue<System.Collections.Generic.Dictionary<int, BaseClass>>();
+            if (list != null && list.TryGetValue(NewBaseClass.m_UniqueID, out var owner) && (object)owner != (object)NewBaseClass && owner) return false;
+            return true;
         }
     }
 }

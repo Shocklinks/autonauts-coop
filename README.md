@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.4**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.5**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -68,6 +68,18 @@ Status: **alpha 0.12.4**. Not affiliated with Denki or Curve Games. Contains no 
 - Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
+
+## 0.12.5: host stutter
+
+- World sections (quests, scripts, planning, ...) are checked one per frame on their own timers instead of all at
+  once every second; a section that is slow to save is checked less often (at most every 6 s).
+- The "full round" of re-checking still objects is spread over frames with a time budget.
+- Changed objects go out as their saved text (no parse and re-serialize), and the anti-entropy digest is built as
+  text: less garbage, so fewer garbage-collection pauses.
+- A joiner's snapshot no longer comes with a second copy of the whole world right before it.
+- Fixed while testing: an item moved from a bot to a player in the same update could vanish on the joiner.
+- Diagnostics: the host's stats line now says where its time goes (scan, changes, sections, digest...) and how
+  long garbage-collection frames took, so the next kit run shows what is left.
 
 ## 0.12.2-0.12.4: real late-game saves (found with the test kit)
 

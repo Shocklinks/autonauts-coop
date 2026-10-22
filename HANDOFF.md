@@ -120,6 +120,13 @@ Sandbox limits:
 
 ## Testing on the owner's PC (test kit)
 
+- **Default workflow (owner's choice):** build in the sandbox, test on the owner's PC ("PC-Shock", left on). Cloud
+  test runs only for what the kit doesn't cover yet (UDP/Steam framing, three-player).
+- The owner runs `kit\Watch.bat` (or set it to start at login with `WatchAtLogin.bat`). To start a test, write a
+  file `kit\requests\<name>.req` (lines `mode=full|save`, `save=<save name>`, `lag=`, `jitter=`) with the
+  device commit tool; read `kit\requests\<name>.done`, then the results folder it names. `kit\watcher-status.txt`
+  shows the watcher is alive. Put the new release zip in `kit\` first (the kit uses the newest one).
+
 - The owner's linked computer has only a Linux VM shell: it can't run the Windows game. The kit does instead.
 - Put the release zip in `kit\` (gitignored) and have the owner double-click `kit\RunTests.bat`.
 - Results land in `kit\results\<date>-<mode>\` (gitignored): `summary.txt`, both sides' `coop_test_*.txt`, `coop.log`,

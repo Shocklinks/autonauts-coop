@@ -28,6 +28,7 @@ namespace AutonautsCoop
         static List<int> ring = new List<int>(); static int ringIdx;
         public static int LastRescanned;
         public static float RingSeconds = 5f;
+        public static double RingBudgetMs = 4.0;
 
         public static void Reset() { Cache.Clear(); parentOf.Clear(); force.Clear(); ring.Clear(); ringIdx = 0; }
         public static void Force(int uid) { force.Add(uid); }
@@ -67,7 +68,7 @@ namespace AutonautsCoop
             if (!Cache.TryGetValue(uid, out var c) || c.B != b) { c = new C { B = b }; Cache[uid] = c; }
             int h = Sync.Stable(b, js).GetHashCode();
             if (c.Json != null && c.Hash != h) c.HotUntil = now + 3f;
-            c.Hash = h; c.Json = js; c.Pos = b.transform.position;
+            c.Hash = h; c.Json = js; c.Pos = b.transform.position; c.LastFull = now;
             LastRescanned++;
             // children named inside this save
             List<int> kids = null;
@@ -129,8 +130,10 @@ namespace AutonautsCoop
             // a slice of everything else
             if (ringIdx >= ring.Count) { ring = new List<int>(Cache.Keys); ringIdx = 0; }
             int slice = Math.Max(ringMin, (int)(ring.Count * Sync.ScanEvery / RingSeconds) + 1);
+            double rs = Prof.Now;
             for (int n = 0; n < slice && ringIdx < ring.Count; ringIdx++)
             {
+                if (host && n >= 40 && (n & 15) == 0 && Prof.Now - rs > RingBudgetMs) break;   // spread the round; the rest goes next scan
                 int uid = ring[ringIdx];
                 if (done.Contains(uid) || !present.Contains(uid) || parentOf.ContainsKey(uid) || !Cache.TryGetValue(uid, out var c) || !c.B) continue;
                 Rescan(c.B, now); n++;

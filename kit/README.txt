@@ -1,5 +1,5 @@
 AutonautsCoop test kit
-Version 0.12.1 - 2026-10-21 - Created with Claude
+Version 0.12.5 - 2026-10-22 - Created with Claude
 
 What it does
   Runs two copies of Autonauts on this PC, a host and a joiner. The mod's built-in test bots play both
@@ -28,3 +28,12 @@ Options (from a command prompt in this folder)
   RunTests.bat -Mode save -Save "My base" -Lag 150 -Jitter 50
   RunTests.bat -Mode full -Work D:\AutonautsCoopTest      (put the game copies on another drive)
   RunTests.bat -Mode save -WatchSeconds 600               (watch your save for 10 minutes)
+
+Running tests without anyone at the PC (watcher)
+  1. Double-click Watch.bat and leave its window open (or run WatchAtLogin.bat once so it starts when you log in;
+     "WatchAtLogin.bat remove" undoes that).
+  2. Claude drops a request file into kit\requests\ (for example mode=save, save=BRAVO). The watcher runs the kit
+     for it and writes <name>.done with where the results are.
+  3. The watcher only ever runs this test kit, with only these settings: mode (full/save), save (must be one of your
+     saves), lag, jitter, minutes, watch. Close its window to stop it.
+  The PC must stay logged in (locking the screen is fine; signing out or sleep stops it).

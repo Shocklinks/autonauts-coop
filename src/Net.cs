@@ -35,6 +35,7 @@ namespace AutonautsCoop
         public float LastHeard = -1f;   // set on the main thread by SteamNet.Pump
         public static long BytesSent, BytesRecv;   // stats (all peers)
         public float Rtt = -1f;                    // seconds, measured with Msg.Echo
+        public bool Hold;                          // host: not yet in the broadcast (its snapshot is being made)
         public abstract void Send(Msg t, byte[] data);
         public void Send(Msg t, string s)
         {
@@ -166,8 +167,10 @@ namespace AutonautsCoop
 
         public void Broadcast(Msg t, byte[] d)
         {
-            lock (Peers) foreach (var p in Peers) if (p.Alive && p.Name != "?") p.Send(t, d);
+            lock (Peers) foreach (var p in Peers) if (p.Alive && p.Name != "?" && !p.Hold) p.Send(t, d);
         }
+
+        public bool AnyRecipient() { lock (Peers) return Peers.Exists(p => p.Alive && p.Name != "?" && !p.Hold); }
 
         public void Stop()
         {

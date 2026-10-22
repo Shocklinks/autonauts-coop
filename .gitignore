@@ -4,3 +4,5 @@ out/
 *.zip
 kit/results/
 kit/*.zip
+kit/requests/
+kit/watcher-status.txt

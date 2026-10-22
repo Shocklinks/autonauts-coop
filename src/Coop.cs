@@ -104,7 +104,9 @@ namespace AutonautsCoop
         {
             if (!InGame()) { Plugin.Log("snapshot requested but host not in game"); return; }
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            Sync.FlushBeforeSnapshot();
+            // pending changes go to the players already here; the new one gets them in its snapshot
+            peer.Hold = true;
+            try { Sync.FlushBeforeSnapshot(); } finally { peer.Hold = false; }
             string world = CaptureWorld();
             var packed = Gz.Pack(world);
             Plugin.Log("snapshot for peer " + peer.Id + ": " + world.Length + " chars, " + packed.Length + " bytes gz, " + sw.ElapsedMilliseconds + " ms, objects " + ObjectCount());
@@ -200,7 +202,12 @@ namespace AutonautsCoop
             try
             {
                 SteamNet.Pump();
-                if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); Shared.HostTick(); }
+                if (Role == Role.Host)
+                {
+                    double a = Prof.Now; HostUpdate(); double b = Prof.Now; Prof.Add("joiner input", b - a);
+                    Sync.HostTick(); double c = Prof.Now;
+                    Shared.HostTick(); Prof.Add("shared editors", Prof.Now - c);
+                }
                 else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); Shared.ClientTick(); Look.ClientTick(); }
                 Diag.EchoTick();
                 Diag.Tick();

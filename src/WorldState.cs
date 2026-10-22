@@ -84,20 +84,28 @@ namespace AutonautsCoop
             return n;
         }
 
-        public static void ResetSent() { sent.Clear(); next = 0; prevLocked = null; }
+        public static void ResetSent() { sent.Clear(); next = 0; prevLocked = null; due.Clear(); }
 
+        // One section per frame, each on its own timer: saving them all at once (quests are big in a late game) made a
+        // stutter every second. A section that is slow to save is checked less often (at most every 6 s).
+        static readonly Dictionary<string, float> due = new Dictionary<string, float>();
+        static int nextSection;
         public static void HostTick(bool force = false)
         {
-            if (!force && Time.realtimeSinceStartup < next) return;
-            next = Time.realtimeSinceStartup + Every;
+            float now = Time.realtimeSinceStartup;
             var w = new JSONObject();
-            foreach (var s in Sections)
+            for (int i = 0; i < Sections.Length; i++)
             {
+                string s = Sections[(nextSection + i) % Sections.Length];
+                if (!force && due.TryGetValue(s, out float d) && now < d) continue;
+                double t0 = Prof.Now;
                 JSONNode node;
-                try { node = SaveSection(s); } catch (Exception e) { Plugin.Log("world " + s + " save: " + e.Message); continue; }
+                try { node = SaveSection(s); } catch (Exception e) { Plugin.Log("world " + s + " save: " + e.Message); due[s] = now + Every; continue; }
                 int h = node.ToString().GetHashCode();
-                if (sent.TryGetValue(s, out int old) && old == h) continue;
-                sent[s] = h; w[s] = node;
+                double ms = Prof.Now - t0; Prof.Add("section " + s, ms);
+                due[s] = now + Mathf.Clamp((float)ms * 0.15f, Every, 6f);
+                if (!(sent.TryGetValue(s, out int old) && old == h)) { sent[s] = h; w[s] = node; }
+                if (!force) { nextSection = (nextSection + i + 1) % Sections.Length; break; }
             }
             if (w.Count == 0) return;
             var m = new JSONObject(); m["world"] = w;

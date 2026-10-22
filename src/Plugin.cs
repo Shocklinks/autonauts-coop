@@ -1,5 +1,5 @@
 // AutonautsCoop - host-authoritative co-op for Autonauts
-// Version 0.12.4 - 2026-10-22 - Created with Claude
+// Version 0.12.5 - 2026-10-22 - Created with Claude
 using System;
 using System.IO;
 using BepInEx;
@@ -13,7 +13,7 @@ namespace AutonautsCoop
     {
         public static Plugin Instance;
         public static string LogPath;
-        public const string Version = "0.12.4";
+        public const string Version = "0.12.5";
 
         void Awake()
         {
