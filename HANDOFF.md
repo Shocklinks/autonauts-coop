@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.12.1 - 2026-10-22 - Created with Claude
+Version 0.12.2 - 2026-10-22 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -125,6 +125,10 @@ Sandbox limits:
 - Results land in `kit\results\<date>-<mode>\` (gitignored): `summary.txt`, both sides' `coop_test_*.txt`, `coop.log`,
   `coop_diag.log`, Unity `player.log`. Read them through the linked folder.
 - The sandbox runs ~2 fps under Wine: tests that need N frames must count frames, not seconds.
+- Real saves can use Steam Workshop (Lua) mods; the kit's copies still load them. Settlement mode has Folk inside
+  huts (nested JSON) and a Transmitter that makes local, non-savable rewards: watch for objects the joiner creates
+  on its own taking host UIDs.
+- The sandbox can't hold two large-map copies for long (the joiner gets OOM-killed after ~5 min); use the kit.
 - `coop_diag.log` is the first place to look in a real-session bug report: "send"/"from" lines pair each joiner
   action with the host's outcome, "rebuilt"/"didn't match" lines show sync churn, "stats 10s" lines show fps/RTT.
 

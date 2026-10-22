@@ -171,7 +171,7 @@ namespace AutonautsCoop
         // ---------------- per frame ----------------
         static float nextSummary, frameSum, frameMax; static int frames;
         static int lastSelectTarget = -2; static GameStateManager.State lastState = GameStateManager.State.Total;
-        static long bytesIn0, bytesOut0; static int batches0, recreated0, inplace0; static double apply0;
+        static long bytesIn0, bytesOut0; static int moverSaves0, moverSkips0; static int batches0, recreated0, inplace0; static double apply0;
 
         public static void Tick()
         {
@@ -197,7 +197,7 @@ namespace AutonautsCoop
                 if (nextSummary > 0) Summary(now);
                 nextSummary = now + 10f;
                 frames = 0; frameSum = 0; frameMax = 0;
-                bytesIn0 = Peer.BytesRecv; bytesOut0 = Peer.BytesSent; batches0 = Sync.StatBatches; recreated0 = Sync.StatRecreated; inplace0 = Sync.StatInPlace; apply0 = Sync.StatApplyMs;
+                bytesIn0 = Peer.BytesRecv; bytesOut0 = Peer.BytesSent; moverSaves0 = Scan.StatMoverSaves; moverSkips0 = Scan.StatMoverSkips; batches0 = Sync.StatBatches; recreated0 = Sync.StatRecreated; inplace0 = Sync.StatInPlace; apply0 = Sync.StatApplyMs;
             }
         }
 
@@ -262,7 +262,7 @@ namespace AutonautsCoop
             }
             else if (Coop.Role == Role.Host && Coop.I.Host != null)
             {
-                sb.Append(" | scan ").Append(Sync.LastScanMs.ToString("F1")).Append(" ms | objects ").Append(Coop.ObjectCount());
+                sb.Append(" | scan ").Append(Sync.LastScanMs.ToString("F1")).Append(" ms (movers re-saved ").Append(Scan.StatMoverSaves - moverSaves0).Append(", skipped ").Append(Scan.StatMoverSkips - moverSkips0).Append(") | objects ").Append(Coop.ObjectCount());
                 lock (Coop.I.Host.Peers)
                     foreach (var p in Coop.I.Host.Peers)
                         if (p.Alive && p.Name != "?") sb.Append(" | ").Append(p.Name).Append(" rtt ").Append(p.Rtt >= 0 ? (p.Rtt * 1000).ToString("F0") + " ms" : "?");

@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.1**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.4**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -68,6 +68,37 @@ Status: **alpha 0.12.1**. Not affiliated with Denki or Curve Games. Contains no 
 - Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
+
+## 0.12.2-0.12.4: real late-game saves (found with the test kit)
+
+The first test-kit run on a real save (Settlement mode, 420x240, ~10,800 objects, 53 bots, mods) broke the joiner
+within seconds. Fixed:
+
+- **Settlement Transmitter rewards took the host's next UIDs on the joiner.** The joiner's own character and new items
+  then landed on those local objects (parented to the Transmitter), and sync errors cascaded. The joiner now gives
+  those rewards UIDs from its own range.
+- **Leftovers of objects destroyed with their parent** (a bot's load, a hut's folk) stayed in the game's UID registry,
+  plot lists and collections. New copies then got the wrong UID or failed with "same key", and the whistle screen
+  stopped at a dead bot (so no bot could be picked). The joiner now clears such leftovers.
+- **Huts rebuilt every update** with their folk (folk energy and timers change constantly). Huts and their folk are
+  now updated in place.
+- The whistle screen no longer breaks when the hovered bot is rebuilt.
+- 0.12.3 (second kit run on the same save):
+  - Updates that change nothing are skipped. The host re-sends everything right after a join; ~700 blueprints and
+    bots were rebuilt for nothing (a second-long stall, and the joiner's character briefly vanished).
+  - A joiner's character using a building is reloaded in place (the "engaged" link is kept) instead of rebuilt,
+    which closed their building screen.
+  - Host: bots, animals and vehicles are re-saved only when something visible changed (tile, facing, state,
+    hands, energy) or once a second. That was most of the host's scan time on a 53-bot base (host fell from
+    ~230 to ~60 fps with a joiner).
+  - The save test lists which objects differ when the worlds don't match.
+- 0.12.4 (third kit run):
+  - **Bot programs no longer delete buildings on the joiner.** A program names the workbench or storage it uses by
+    UID; those were taken for things the bot holds, so every bot update destroyed them on the joiner (~700 objects
+    missing after a join, ~12,000 re-requests in 4 minutes). Only real saved objects count as held now.
+  - Held items' own tile and a modded item's "Used":0 no longer make objects look different.
+  - The joiner's player list always has their own character first (it could be empty for a moment).
+- Test kit: partial results are saved during the run, so closing the window early still leaves logs.
 
 ## 0.12.1: picking bots, diagnostics, test kit
 

@@ -47,8 +47,15 @@ namespace AutonautsCoop
         static readonly System.Text.RegularExpressions.Regex VolatileAnimal = new System.Text.RegularExpressions.Regex(",\"(S|ST)\":-?[0-9.eE+-]+");
         static readonly System.Text.RegularExpressions.Regex Rotation = new System.Text.RegularExpressions.Regex(",\"Rotation\":-?[0-9]+");
         static bool IsPath(ObjectType t) => t == ObjectType.SandPath || t == ObjectType.StonePath || t == ObjectType.RoadCrude || t == ObjectType.RoadGood;
+        // A held item's own tile (inside its holder's save) lags behind the holder on one side or the other; and a
+        // modded item saves "Used":0 on one machine but not the other. Neither matters.
+        static readonly System.Text.RegularExpressions.Regex ChildPos = new System.Text.RegularExpressions.Regex("(\\{\"ID\":\"[^\"]*\",\"UID\":-?\\d+),\"TX\":-?\\d+,\"TY\":-?\\d+");
+        static readonly System.Text.RegularExpressions.Regex UsedZero = new System.Text.RegularExpressions.Regex(",\"Used\":0(?=[,}])");
         public static string Stable(BaseClass b, string json)
         {
+            int n = 0;
+            json = ChildPos.Replace(json, m => n++ == 0 ? m.Value : m.Groups[1].Value);   // keep the object's own tile
+            json = UsedZero.Replace(json, "");
             json = VolatileAll.Replace(json, "");
             if (b is Animal) json = VolatileAnimal.Replace(json, "");
             else if (b is Floor2D || IsPath(b.m_TypeIdentifier)) json = Rotation.Replace(json, "");   // paths/flooring pick their look from neighbours on each machine
@@ -449,7 +456,8 @@ namespace AutonautsCoop
             foreach (var kv in Savables()) if (kv.Key && kv.Key.m_UniqueID > 0) HostKnown.Add(kv.Key.m_UniqueID);
             // Objects the joiner creates locally (edit-mode cursor/previews, effects) get UIDs from a range the
             // host never reaches, so they can't collide with objects the host creates later.
-            ObjectTypeList.Instance.SetUniqueIDCounter(LocalUidBase);
+            // (never go back: local UIDs already handed out must not be reused)
+            if (Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDCounter").GetValue<int>() < LocalUidBase) ObjectTypeList.Instance.SetUniqueIDCounter(LocalUidBase);
             Shared.OnClientLoaded();
             Scan.Reset(); Scan.Full();
             foreach (var d in early) Guard("early delta", () => ClientApplyDelta(Gz.Unpack(d)));
@@ -464,9 +472,68 @@ namespace AutonautsCoop
             finally { double ms = swApply.Elapsed.TotalMilliseconds; StatApplyMs += ms; if (ms > StatApplyMaxMs) StatApplyMaxMs = ms; }
         }
 
+        static bool destroyedLastBatch;
+        /// Objects Unity destroyed together with their parent (a bot's load, a building's contents) never leave the
+        /// UID registry or their plot's lists. Their UIDs then look taken: the host's copy gets a new UID ("UID
+        /// mismatch") or loading throws "same key". Clear such leftovers (they read as null one frame after Destroy).
+        public static int StatPurged;
+        public static void PurgeDead()
+        {
+            if (Coop.Role != Role.Client) return;
+            // collections ("Worker", "Savable", ...): the whistle screen walks the Worker one and stopped at a dead entry
+            var cols = Traverse.Create(typeof(CollectionManager)).Field("m_Objects").GetValue<System.Collections.IDictionary>();
+            if (cols != null)
+                foreach (var col in cols.Values)
+                {
+                    var d = Traverse.Create(col).Field("m_ObjectsDictionary").GetValue<Dictionary<BaseClass, int>>();
+                    if (d == null) continue;
+                    List<BaseClass> deadKeys = null;
+                    foreach (var k in d.Keys) if (!k) (deadKeys ?? (deadKeys = new List<BaseClass>())).Add(k);
+                    if (deadKeys != null) { foreach (var k in deadKeys) d.Remove(k); StatPurged += deadKeys.Count; }
+                }
+            if (uidList == null) uidList = Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDList").GetValue<Dictionary<int, BaseClass>>();
+            List<int> dead = null;
+            if (uidList != null) foreach (var kv in uidList) if (!kv.Value) (dead ?? (dead = new List<int>())).Add(kv.Key);
+            if (dead != null)
+            {
+                var ids = Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDs").GetValue<Dictionary<BaseClass, int>>();
+                foreach (var u in dead) { var v = uidList[u]; uidList.Remove(u); if (ids != null && (object)v != null) ids.Remove(v); }
+                StatPurged += dead.Count;
+            }
+            var pm = PlotManager.Instance;
+            if (pm && pm.m_Plots != null)
+                foreach (var p in pm.m_Plots)
+                {
+                    if (!p || p.m_Objects == null) continue;
+                    List<int> gone = null;
+                    foreach (var kv in p.m_Objects) if (!kv.Value) (gone ?? (gone = new List<int>())).Add(kv.Key);
+                    if (gone == null) continue;
+                    foreach (var u in gone) p.m_Objects.Remove(u);
+                    if (p.m_ObjectDictionary != null) foreach (var l in p.m_ObjectDictionary.Values) l.RemoveAll(o => !o);
+                    StatPurged += gone.Count;
+                }
+            FixPlayers();
+        }
+
+        /// Drop dead entries from the player list and make sure every live player (mine first) is in it.
+        public static void FixPlayers()
+        {
+            var players = Traverse.Create(typeof(CollectionManager)).Field("m_Players").GetValue<List<BaseClass>>();
+            var me = MyPlayerUID >= 0 ? ObjectTypeList.Instance.GetObjectFromUniqueID(MyPlayerUID, false) : null;
+            if (players != null && me && me is FarmerPlayer && !players.Contains(me)) { players.RemoveAll(b => !b); players.Insert(0, me); }
+            if (players != null && Savables() != null)
+            {
+                players.RemoveAll(b => !b);
+                // a rebuilt player's new object must be in the list (input, HUD and teaching use player 0)
+                foreach (var kv in Savables())
+                    if (kv.Key is FarmerPlayer fp && fp.GetComponent<Savable>().GetIsSavable() && !players.Contains(fp)) { if (fp.m_UniqueID == MyPlayerUID) players.Insert(0, fp); else players.Add(fp); }
+            }
+        }
+
         static void ClientApplyDeltaInner(string json)
         {
             StatBatches++;
+            if (destroyedLastBatch) { destroyedLastBatch = false; PurgeDead(); }
             var n = JSON.Parse(json);
             Applying = true;
             // Same mode the game's own loader uses: new objects keep the UID from the JSON and register in Load.
@@ -571,6 +638,7 @@ namespace AutonautsCoop
                 catch (Exception e) { Plugin.Log("map remove failed for " + b.m_UniqueID + ": " + e.Message); }
             }
             b.StopUsing();
+            destroyedLastBatch = true;
         }
 
         static void Remove(int uid)
@@ -592,13 +660,34 @@ namespace AutonautsCoop
             finally { if (reselect && ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) != b) Teach.Reselect(uid); }
         }
 
+        public static int StatSame, StatKeptEngaged;
+        /// A farmer's save names what it is engaged with ("Engaged"), but Load only notes the id; the link is made when
+        /// a whole world loads. Reloading a joiner's character in place while it used a workbench dropped the link, the
+        /// check failed, and the character was rebuilt (closing the joiner's building screen mid-use).
+        static void KeepEngaged(BaseClass b, JSONNode o, BaseClass before)
+        {
+            var f = b as Farmer;
+            if (!f || f.m_EngagedObject) return;
+            int want = o["Engaged"] != null && !o["Engaged"].IsNull ? o["Engaged"].AsInt : -1;
+            if (want <= 0) return;
+            var e = before && before.m_UniqueID == want ? before : ObjectTypeList.Instance.GetObjectFromUniqueID(want, false);
+            var a = e ? e.GetComponent<Actionable>() : null;
+            if (a) { f.m_EngagedObject = a; StatKeptEngaged++; }
+        }
         static void UpsertInner(JSONNode o, int uid, BaseClass b)
         {
             string want = o.ToString();
+            // Already exactly what the host has (e.g. everything the host re-sends right after a join): nothing to do.
+            // Rebuilding those (blueprints with their building-to-be, bots carrying things) cost ~700 rebuilds and a
+            // second-long stall on a big base, and briefly took the joiner's own character away.
+            if (b && (bool)b.GetComponent<Savable>() && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false)
+                && !(b.transform.parent && b.transform.parent.GetComponentInParent<BaseClass>())
+                && Stable(b, SaveObject(b, out _)) == Stable(b, want)) { StatSame++; return; }
             var nested = new List<int>();
             CollectUIDs(want, uid, nested);
             // a blueprint's building-to-be is created by its Load and only named by "NewID"
             if (o["NewID"] != null && !o["NewID"].IsNull && o["NewID"].AsInt > 0) nested.Add(o["NewID"].AsInt);
+            if (nested.Count > 0 && b is Housing hs && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && HousingInPlace(hs, o, want, uid)) return;
             if (nested.Count > 0)
             {
                 // Children (carried items, nests, contents) are rebuilt by the parent's Load; clear them first.
@@ -612,7 +701,9 @@ namespace AutonautsCoop
                         ClearHeld(b.GetComponent<Farmer>());
                         ResetRuntime(b);
                         if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
+                        var engKeep = (b as Farmer) ? ((Farmer)b).m_EngagedObject : null;
                         b.GetComponent<Savable>().Load(o);
+                        KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
                         string got = Stable(b, SaveObject(b, out _));
                         if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; StatNestedInPlace++; return; }
@@ -657,7 +748,9 @@ namespace AutonautsCoop
                         ResetRuntime(b);
                         // Savable.Load re-registers the UID (ChangeActionable); unregister first or it allocates a new one.
                         if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
+                        var engKeep = (b as Farmer) ? ((Farmer)b).m_EngagedObject : null;
                         b.GetComponent<Savable>().Load(o);
+                        KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
                         string got = Stable(b, SaveObject(b, out _));
                         if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; return; }
@@ -673,7 +766,39 @@ namespace AutonautsCoop
             Create(o);
         }
 
-        public static int StatNestedInPlace;
+        public static int StatNestedInPlace, StatHousingInPlace;
+
+        /// Settlement huts save their folk inside them, and folk change all the time (energy, timers), so every hut
+        /// changed every scan and was rebuilt with its folk. Update the hut and each of its folk in place instead,
+        /// as long as the same folk live there.
+        static bool HousingInPlace(Housing h, JSONNode o, string want, int uid)
+        {
+            try
+            {
+                var arr = o["Folks"].AsArray;
+                int n = arr != null ? arr.Count : 0;
+                if (h.m_Folks == null || h.m_Folks.Count != n) return false;
+                var byUid = new Dictionary<int, Folk>();
+                foreach (var f in h.m_Folks) { if (!f) return false; byUid[f.m_UniqueID] = f; }
+                for (int i = 0; i < n; i++) if (!byUid.ContainsKey(arr[i]["UID"].AsInt)) return false;
+                // the hut itself, without re-creating its folk
+                var shell = JSON.Parse(want); shell["Folks"] = new JSONArray();
+                if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == h) ObjectTypeList.Instance.RemoveActionable(h);
+                h.GetComponent<Savable>().Load(shell);
+                h.GetComponent<Savable>().PostLoad();
+                for (int i = 0; i < n; i++)
+                {
+                    var f = byUid[arr[i]["UID"].AsInt];
+                    if (ObjectTypeList.Instance.GetObjectFromUniqueID(f.m_UniqueID, false) == f) ObjectTypeList.Instance.RemoveActionable(f);
+                    f.GetComponent<Savable>().Load(arr[i]);
+                }
+                string got = Stable(h, SaveObject(h, out _));
+                if (h.m_UniqueID == uid && got == Stable(h, want)) { StatInPlace++; StatHousingInPlace++; return true; }
+                LogDiff("housing " + (string)o["ID"], want, got);
+            }
+            catch (Exception e) { Plugin.Log("in-place housing load failed for " + o["ID"] + ": " + e.Message); }
+            return false;
+        }
 
         /// Empty a farmer's hands, pockets, upgrades and clothes lists (their objects were destroyed just before)
         /// so its Load can fill them from the host's JSON without duplicates.
@@ -728,6 +853,29 @@ namespace AutonautsCoop
             Plugin.Log("in-place mismatch " + type + " at " + i + "\n  want: " + want.Substring(from, Math.Min(200, want.Length - from)) + "\n  got:  " + got.Substring(from, Math.Min(200, got.Length - from)));
         }
 
+        public static int StatUidFixes, StatStaleUids;
+        static Dictionary<int, BaseClass> uidList;
+        /// Drop a registry entry for this UID if it belongs to nothing live (or we were told to clear it).
+        static void FreeUid(int uid)
+        {
+            if (uidList == null) uidList = Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDList").GetValue<Dictionary<int, BaseClass>>();
+            if (uidList == null || !uidList.TryGetValue(uid, out var held)) return;
+            if (held && held.gameObject.activeInHierarchy && held.m_UniqueID == uid) { Destroy(held); if (!uidList.ContainsKey(uid)) return; }
+            uidList.Remove(uid);
+            var ids = Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDs").GetValue<Dictionary<BaseClass, int>>();
+            if (ids != null && (object)held != null) ids.Remove(held);
+            StatStaleUids++;
+            var pm = PlotManager.Instance;
+            if (pm && pm.m_Plots != null)
+                foreach (var p in pm.m_Plots)
+                    if (p && p.m_Objects != null && p.m_Objects.TryGetValue(uid, out var po))
+                    {
+                        p.m_Objects.Remove(uid);
+                        if (p.m_ObjectDictionary != null && (object)po != null) foreach (var l in p.m_ObjectDictionary.Values) l.Remove(po);
+                    }
+            if (StatStaleUids <= 50) Plugin.Log("freed stale UID " + uid + " (held by " + ((object)held == null ? "nothing" : held ? held.m_TypeIdentifier + (held.gameObject.activeInHierarchy ? "" : ", inactive") : "a destroyed object") + ")");
+        }
+
         static void CleanupUid(int uid)
         {
             try
@@ -755,7 +903,10 @@ namespace AutonautsCoop
         public static readonly Dictionary<string, int> RecreatedByTypeWindow = new Dictionary<string, int>();   // diagnostics: last 10 s
         public static readonly Dictionary<int, int> RecreatedUid = new Dictionary<int, int>();
 
-        static readonly System.Text.RegularExpressions.Regex UidRx = new System.Text.RegularExpressions.Regex("\"UID\"\\s*:\\s*(-?\\d+)");
+        // Only saved objects count: they start {"ID":"<type>","UID":n. A bot's program also names objects by "UID"
+        // (the workbench or storage an instruction uses); taking those as the bot's children made every bot update
+        // destroy the buildings its program uses (hundreds missing after a join on a big base, endless re-requests).
+        static readonly System.Text.RegularExpressions.Regex UidRx = new System.Text.RegularExpressions.Regex("\\{\\s*\"ID\"\\s*:\\s*\"[^\"]*\"\\s*,\\s*\"UID\"\\s*:\\s*(-?\\d+)");
         /// All UIDs mentioned in the object's JSON except its own (one occurrence of the root UID is skipped).
         public static void CollectUIDs(string json, int rootUid, List<int> into)
         {
@@ -776,6 +927,15 @@ namespace AutonautsCoop
             // A client-local object may hold this UID (spawn effects etc). Host wins.
             var clash = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
             if (clash) Destroy(clash);
+            FreeUid(uid);   // also entries left by objects Unity destroyed with their parent (never unregistered)
+            // the same for what it holds (a bot carrying an item our copy still has lying on the ground)
+            var kids = new List<int>(); CollectUIDs(o.ToString(), uid, kids);
+            foreach (var k in kids)
+            {
+                var kb = ObjectTypeList.Instance.GetObjectFromUniqueID(k, false);
+                if (kb) Destroy(kb);
+                FreeUid(k);
+            }
             HostKnown.Add(uid);
             // Players and bots create HUD indicators under HudManager's indicator root in PostCreate. Some screens
             // (inventory, teaching) hide that root, so the indicator's Awake hasn't run and PostCreate throws.
@@ -798,7 +958,16 @@ namespace AutonautsCoop
             if (bld) bld.PostLoad(o);
             b.GetComponent<Savable>().PostLoad();
             b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
-            if (b.m_UniqueID != uid) Plugin.Log("UID mismatch on create: wanted " + uid + " got " + b.m_UniqueID);
+            if (b.m_UniqueID != uid)
+            {
+                // the UID was still taken: move the new object onto the host's UID so later updates find it
+                Plugin.Log("UID mismatch on create: wanted " + uid + " got " + b.m_UniqueID + "; moving it");
+                ObjectTypeList.Instance.RemoveActionable(b);
+                FreeUid(uid);
+                ObjectTypeList.Instance.ChangeActionable(b, uid);
+                StatUidFixes++;
+            }
+            if (b is FarmerPlayer) FixPlayers();
             if (uid == MyPlayerUID) Teach.AttachToMyPlayer();
             if (Coop.Role == Role.Client && b.GetComponent<Worker>()) Groups.Relink(b.GetComponent<Worker>());
             return b;
@@ -905,6 +1074,7 @@ namespace AutonautsCoop
         static void Postfix(List<BaseClass> __result)
         {
             if (Coop.Role == Role.Off) Persist.Ensure();
+            if (Coop.Role == Role.Client && __result != null && (__result.Count == 0 || !__result[0])) Sync.FixPlayers();   // a rebuilt player's old entry
             int mine = Coop.Role == Role.Client ? Sync.MyPlayerUID : Coop.Role == Role.Host ? Sync.HostPlayerUID : Persist.HostUid;
             if (mine < 0 || __result == null || __result.Count < 2) return;
             if (__result[0] && __result[0].m_UniqueID == mine) return;
@@ -931,6 +1101,33 @@ namespace AutonautsCoop
             if (j == null || j.IsNull) return;
             int n = j.AsInt;
             __result = (n >= 0 ? n + 0.25f : n - 0.25f) / 100f;
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Settlement mode: the Transmitter makes its certificate rewards locally (in its Start, right after the world
+    // loads, and again when quests complete). On the joiner they took the next UIDs, which the host hands out next
+    // (the joiner's own character, new items), so host objects landed on local ones: characters parented to the
+    // Transmitter, "same key" errors, endless rebuilds. On the joiner, give those rewards local UIDs.
+    [HarmonyLib.HarmonyPatch(typeof(Transmitter), nameof(Transmitter.UpdateRewards))]
+    static class P_ClientRewardsLocalUids
+    {
+        static int localNext = Sync.LocalUidBase + 500000000;   // its own block, apart from other local objects
+        static HarmonyLib.Traverse Counter => HarmonyLib.Traverse.Create(typeof(ObjectTypeList)).Field("m_UniqueIDCounter");
+        static void Prefix(out int __state)
+        {
+            __state = -1;
+            if (Coop.Role != Role.Client) return;
+            __state = Counter.GetValue<int>();
+            Counter.SetValue(localNext);
+        }
+        static void Finalizer(int __state)
+        {
+            if (__state < 0) return;
+            localNext = Counter.GetValue<int>();
+            Counter.SetValue(__state);
         }
     }
 }

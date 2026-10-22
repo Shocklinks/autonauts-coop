@@ -260,22 +260,51 @@ namespace AutonautsCoop
         static bool Prefix() => SelectFix.Off || Coop.Role != Role.Client || !Coop.I.ClientLoaded || Sync.Applying;
     }
 
+    // The whistle screen keeps references to the bot under the cursor; on the joiner a bot can be rebuilt by sync
+    // while hovered, leaving a destroyed object there (SetWorker then threw every frame).
+    [HarmonyPatch(typeof(GameStateSelectWorker), nameof(GameStateSelectWorker.SetWorker))]
+    static class P_SelectDropDestroyed
+    {
+        static void Prefix(GameStateSelectWorker __instance, ref Worker NewWorker)
+        {
+            if (Coop.Role != Role.Client) return;
+            var t = Traverse.Create(__instance);
+            foreach (var f in new[] { "m_CurrentTarget", "m_NextTarget", "m_SelectedBot", "m_TargetObject" })
+            {
+                var w = t.Field(f).GetValue<Worker>();
+                if ((object)w != null && !w) t.Field(f).SetValue(null);
+            }
+            if ((object)NewWorker != null && !NewWorker) NewWorker = null;
+        }
+    }
+
+    [HarmonyPatch(typeof(GameStateSelectWorker), "Awake")]
+    static class P_SelectPurgeFirst { static void Prefix() { Sync.PurgeDead(); } }   // its Awake walks every bot
+
     [HarmonyPatch(typeof(GameStateSelectWorker), "UpdateIdle")]
     static class P_JoinerPickDrawnBot
     {
         /// The bot the whistle screen's cursor test returns this frame (P_FakeMouse in Diag.cs hands it over).
         public static Worker Override;
+        static Worker last; static Vector3 lastMouse; static float lastAt; static int lastFrame;
         static void Prefix(GameStateSelectWorker __instance)
         {
             Override = null;
             if (SelectFix.Off || Coop.Role != Role.Client || !Coop.I.ClientLoaded) return;
             // what is drawn under the cursor: a bot's body (any bot layer), else the bot standing closest to where the
             // cursor ray lands on the ground (the ray passes through the body and lands just behind it)
-            var go = __instance.TestCollisionOffset(out var cp, true, false, true, false, true, Diag.Mouse);
-            if (!go) return;
-            var w = go.GetComponentInParent<Worker>();
-            if (!w) w = Diag.NearestWorker(cp, Tile.m_Size * 0.9f, out _);
-            if (w && !w.m_BeingHeld) Override = w;
+            var mouse = Diag.Mouse;
+            var go = __instance.TestCollisionOffset(out var cp, true, false, true, false, true, mouse);
+            Worker w = null;
+            if (go)
+            {
+                w = go.GetComponentInParent<Worker>();
+                if (!w) w = Diag.NearestWorker(cp, Tile.m_Size * 0.9f, out _);
+            }
+            // a sync update can rebuild a bot's colliders for a frame; the screen needs 10 steady frames, so keep the
+            // bot that was under a still cursor a moment ago
+            if (!w && last && !last.m_BeingHeld && (mouse - lastMouse).sqrMagnitude < 64f && (Time.realtimeSinceStartup - lastAt < 0.5f || Time.frameCount - lastFrame <= 3)) w = last;
+            if (w && !w.m_BeingHeld) { Override = w; last = w; lastMouse = mouse; lastAt = Time.realtimeSinceStartup; lastFrame = Time.frameCount; }
         }
         static void Finalizer() { Override = null; }
     }

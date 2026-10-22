@@ -17,7 +17,7 @@ namespace AutonautsCoop
         static readonly string SaveName = Environment.GetEnvironmentVariable("COOP_SAVE") ?? "";
         static float WatchSeconds = float.TryParse(Environment.GetEnvironmentVariable("COOP_SOAK_SECONDS"), out var v) ? v : 180f;
 
-        static FarmerPlayer Me() => CollectionManager.Instance.GetPlayers()[0].GetComponent<FarmerPlayer>();
+        static FarmerPlayer Me() { var o = ObjectTypeList.Instance.GetObjectFromUniqueID(Coop.Role == Role.Client ? Sync.MyPlayerUID : Sync.HostPlayerUID, false); return o ? o.GetComponent<FarmerPlayer>() : CollectionManager.Instance.GetPlayers()[0].GetComponent<FarmerPlayer>(); }
         static TileCoord Tile(BaseClass b) => b.GetComponent<TileCoordObject>().m_TileCoord;
         static void Info(string what, string detail) { TestBot.Assert("info: " + what, true, detail); }
         static void Req(string a, Action<JSONObject> f = null) { var n = new JSONObject(); n["a"] = a; f?.Invoke(n); Coop.I.Client.Host.Send(Msg.Input, n.ToString()); }
@@ -133,6 +133,27 @@ namespace AutonautsCoop
             return sum / best.Count;
         }
 
+        /// Which objects differ from the host's (by type), and their JSON here in coop.log.
+        static string Differ(JSONArray u)
+        {
+            if (u == null) return "?";
+            var host = new Dictionary<int, int>();
+            for (int i = 0; i + 1 < u.Count; i += 2) host[u[i].AsInt] = u[i + 1].AsInt;
+            var mine = TestScript.Hashes();
+            var types = new Dictionary<string, int>(); int logged = 0;
+            void Note(int uid, string what)
+            {
+                var b = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
+                string t = (b ? b.m_TypeIdentifier.ToString() : "?") + " " + what;
+                types[t] = types.TryGetValue(t, out int n) ? n + 1 : 1;
+                if (logged++ < 8) Plugin.Log("[test] differs: " + uid + " " + t + (b ? " here: " + Sync.SaveObject(b, out _) : ""));
+            }
+            foreach (var kv in host) { if (!mine.TryGetValue(kv.Key, out int h)) Note(kv.Key, "missing"); else if (h != kv.Value) Note(kv.Key, "different"); }
+            foreach (var kv in mine) if (!host.ContainsKey(kv.Key)) Note(kv.Key, "extra");
+            var parts = new List<string>(); foreach (var kv in types) parts.Add(kv.Key + " " + kv.Value);
+            return string.Join(", ", parts.ToArray());
+        }
+
         public static void BuildClient(List<TestBot.IEnumeratorStep> s)
         {
             s.Add(el => TestBot.AtMainMenu() && el > 8f);
@@ -184,7 +205,7 @@ namespace AutonautsCoop
                 GameStateManager.Instance.SetState(GameStateManager.State.SelectWorker);
                 return true;
             });
-            s.Add(el => { Frame(); if (TestScript.wanderUids.Count == 0) return true; if (el < 1f) { CameraManager.Instance.Focus(BotCrowd() ?? Vector3.zero); return false; } return TestScript.SelectTrials(el); });
+            s.Add(el => { Frame(); if (TestScript.wanderUids.Count == 0) return true; return TestScript.SelectTrials(el); });
             s.Add(el =>
             {
                 Diag.FakeMouse = null; Diag.FakeTrack = null;
@@ -235,7 +256,9 @@ namespace AutonautsCoop
                 TestScript.Checksum(out int c, out long sum);
                 bool ok = TestScript.Chk != null && TestScript.Chk["count"].AsInt == c && TestScript.Chk["sum"].Value == sum.ToString();
                 if (TestScript.Chk != null && !ok && chkTries++ < 6) { TestScript.Chk = null; Req("chk"); return false; }
-                TestBot.Assert("client: whole world matches the host", ok, TestScript.Chk == null ? "no reply" : "host " + TestScript.Chk["count"].AsInt + " objects, me " + c);
+                string why = TestScript.Chk == null ? "no reply" : "host " + TestScript.Chk["count"].AsInt + " objects, me " + c;
+                if (TestScript.Chk != null && !ok) why += "; differ: " + Differ(TestScript.Chk["u"].AsArray);
+                TestBot.Assert("client: whole world matches the host", ok, why);
                 Req("soak_hoststats");
                 return true;
             });

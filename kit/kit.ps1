@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - kit.ps1
-# Version 0.12.1 - 2026-10-21 - Created with Claude
+# Version 0.12.2 - 2026-10-22 - Created with Claude
 #
 # Runs two copies of Autonauts on this PC (a host and a joiner), both driven by the mod's built-in test bots,
 # and collects the results in kit\results\<date>-<mode>\.
@@ -133,6 +133,20 @@ if ($Mode -eq "save") {
     if ($LASTEXITCODE -ge 8) { Fail "Copying the save failed (robocopy $LASTEXITCODE)" }
 }
 
+# ---------------- collect (also during the run) ----------------
+function Collect {
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    foreach ($r in @("host", "client")) {
+        $b = Join-Path $Work "$r\BepInEx"
+        foreach ($f in @("coop_test_$r.txt", "coop.log", "coop_diag.log", "LogOutput.log")) {
+            $src = Join-Path $b $f
+            if (Test-Path $src) { try { Copy-Item $src (Join-Path $out "$r-$f") -Force } catch {} }
+        }
+        $pl = Join-Path $Work "$r\player.log"
+        if (Test-Path $pl) { try { Copy-Item $pl (Join-Path $out "$r-player.log") -Force } catch {} }
+    }
+}
+
 # ---------------- run ----------------
 function Start-Role([string]$r) {
     $env:COOP_TEST = $r
@@ -163,7 +177,7 @@ try {
     $ph = Start-Role "host"
     Start-Sleep -Seconds 5
     $pc = Start-Role "client"
-    $lastShown = ""
+    $lastShown = ""; $tick = 0
     $deadline = (Get-Date).AddMinutes($Minutes)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 5
@@ -175,6 +189,7 @@ try {
         $mins = [Math]::Round(((Get-Date) - $started).TotalMinutes, 1)
         $status = "  $mins min: $pass passed, $fail failed"
         if ($status -ne $lastShown) { Write-Host "`r$status   " -NoNewline; $lastShown = $status }
+        $tick++; if ($tick % 6 -eq 0) { Collect }   # partial results survive closing this window
         if ((Test-Path $resClient) -and (Select-String -Path $resClient -Pattern "^DONE" -Quiet)) { Start-Sleep -Seconds 5; break }
         if ($ph.HasExited -and $pc.HasExited) { Say ""; Say "Both games closed." Yellow; break }
     }
@@ -184,17 +199,7 @@ finally {
     foreach ($p in @($ph, $pc)) { if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force } catch {} } }
 }
 
-# ---------------- collect ----------------
-New-Item -ItemType Directory -Force -Path $out | Out-Null
-foreach ($r in @("host", "client")) {
-    $b = Join-Path $Work "$r\BepInEx"
-    foreach ($f in @("coop_test_$r.txt", "coop.log", "coop_diag.log", "LogOutput.log")) {
-        $src = Join-Path $b $f
-        if (Test-Path $src) { Copy-Item $src (Join-Path $out "$r-$f") }
-    }
-    $pl = Join-Path $Work "$r\player.log"
-    if (Test-Path $pl) { Copy-Item $pl (Join-Path $out "$r-player.log") }
-}
+Collect
 $all = @()
 foreach ($f in @($resHost, $resClient)) { if (Test-Path $f) { $all += @(Get-Content $f) } }
 $pass = @($all | Where-Object { $_ -like "PASS*" }).Count

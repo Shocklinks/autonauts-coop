@@ -1,5 +1,5 @@
 // AutonautsCoop - Scan.cs - incremental change detection (big bases)
-// Version 0.10.0 - 2026-10-21 - Created with Claude
+// Version 0.12.2 - 2026-10-22 - Created with Claude
 //
 // Serializing every object five times a second costs ~0.035 ms per object; a late-game base with 8,000+ objects
 // spent ~280 ms per scan. Instead, keep each object's last JSON/hash and only re-serialize what may have changed:
@@ -17,7 +17,7 @@ namespace AutonautsCoop
 {
     public static class Scan
     {
-        public class C { public BaseClass B; public int Hash; public string Json; public List<int> Nested; public float HotUntil; public Vector3 Pos; }
+        public class C { public BaseClass B; public int Hash; public string Json; public List<int> Nested; public float HotUntil; public Vector3 Pos; public long Fp; public float LastFull; }
 
         public static readonly Dictionary<int, C> Cache = new Dictionary<int, C>();
         static readonly Dictionary<int, int> parentOf = new Dictionary<int, int>();   // child uid -> parent uid
@@ -34,6 +34,24 @@ namespace AutonautsCoop
         public static bool IsNested(int uid) => parentOf.ContainsKey(uid);
 
         static bool Moves(BaseClass b) => b is Farmer || b is Animal || b is Vehicle;
+        public static float MoverFullEvery = 1f;
+        public static int StatMoverSaves, StatMoverSkips;
+
+        /// What changes when a mover does something worth re-saving: tile, facing, state, hands, energy, engagement.
+        static long Fingerprint(BaseClass b)
+        {
+            var t = b.GetComponent<TileCoordObject>();
+            long h = t ? (t.m_TileCoord.x * 73856093L) ^ (t.m_TileCoord.y * 19349663L) : 0;
+            h = h * 31 + (int)(b.transform.eulerAngles.y / 45f);
+            if (b is Farmer f)
+            {
+                h = h * 31 + (int)f.m_State;
+                h = h * 31 + (f.m_FarmerCarry != null && f.m_FarmerCarry.m_CarryObject != null ? f.m_FarmerCarry.m_CarryObject.Count * 1000 + (int)f.m_FarmerCarry.GetTopObjectType() : 0);
+                h = h * 31 + (int)(f.m_Energy / 5f);
+                h = h * 31 + (f.m_EngagedObject ? f.m_EngagedObject.m_UniqueID : 0);
+            }
+            return h;
+        }
 
         static void Rescan(BaseClass b, float now)
         {
@@ -96,7 +114,17 @@ namespace AutonautsCoop
                 present.Add(uid);
                 if (!Cache.TryGetValue(uid, out var c) || c.B != b || force.Contains(uid)) { Rescan(b, now); continue; }
                 if (!host || parentOf.ContainsKey(uid)) continue;   // carried/contained: travels with its parent
-                if (Moves(b) || now < c.HotUntil || (b.transform.position - c.Pos).sqrMagnitude > 0.0001f) Rescan(b, now);
+                if (Moves(b))
+                {
+                    // Serializing every bot, animal and vehicle five times a second was most of the host's frame time
+                    // on a big base (a bot's save holds its whole program). Their movement goes out separately ("mv");
+                    // re-save one only when something a cheap look can see changed, or once a second regardless.
+                    long fp = Fingerprint(b);
+                    if (fp != c.Fp || now - c.LastFull > MoverFullEvery + (uid % 10) * 0.02f) { Rescan(b, now); c.Fp = fp; c.LastFull = now; StatMoverSaves++; }
+                    else StatMoverSkips++;
+                    continue;
+                }
+                if (now < c.HotUntil || (b.transform.position - c.Pos).sqrMagnitude > 0.0001f) Rescan(b, now);
             }
             // a slice of everything else
             if (ringIdx >= ring.Count) { ring = new List<int>(Cache.Keys); ringIdx = 0; }
