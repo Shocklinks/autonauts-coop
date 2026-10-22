@@ -1,5 +1,5 @@
 // AutonautsCoop - Net.cs - framed TCP transport
-// Version 0.2.0 - 2026-10-20 - Created with Claude
+// Version 0.12.1 - 2026-10-21 - Created with Claude
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -20,6 +20,7 @@ namespace AutonautsCoop
         Ping = 5,
         Info = 6,       // H->C: small JSON (counts, test assertions)
         Bye = 7,
+        Echo = 8,       // both ways: round-trip time (Diag.cs)
     }
 
     public class Packet { public Msg Type; public byte[] Data; public Peer From; }
@@ -32,9 +33,14 @@ namespace AutonautsCoop
         public volatile bool Alive = true;
         public string Name = "?";
         public float LastHeard = -1f;   // set on the main thread by SteamNet.Pump
-        public static long BytesSent;   // stats (all peers)
+        public static long BytesSent, BytesRecv;   // stats (all peers)
+        public float Rtt = -1f;                    // seconds, measured with Msg.Echo
         public abstract void Send(Msg t, byte[] data);
-        public void Send(Msg t, string s) { Send(t, Encoding.UTF8.GetBytes(s)); }
+        public void Send(Msg t, string s)
+        {
+            if (t == Msg.Input && Coop.Role == Role.Client) Diag.Out(s);
+            Send(t, Encoding.UTF8.GetBytes(s));
+        }
         public abstract void Close();
         /// Close after whatever is queued has gone out (used for "lobby ended" / refusal messages).
         public virtual void CloseGracefully() { Close(); }
@@ -100,6 +106,7 @@ namespace AutonautsCoop
                     if (len < 1 || len > 256 * 1024 * 1024) throw new IOException("bad frame length " + len);
                     var body = new byte[len];
                     ReadExact(body, len);
+                    Interlocked.Add(ref BytesRecv, len + 4);
                     var p = new Packet { Type = (Msg)body[0], Data = new byte[len - 1], From = this };
                     Buffer.BlockCopy(body, 1, p.Data, 0, len - 1);
                     lock (inbox) inbox.Enqueue(p);
@@ -140,7 +147,7 @@ namespace AutonautsCoop
 
         public void StartTcp(int port)
         {
-            listener = new TcpListener(IPAddress.Any, port);
+            listener = new TcpListener(Kit.Bind != null ? IPAddress.Parse(Kit.Bind) : IPAddress.Any, port);
             listener.Start();
             new Thread(() =>
             {
@@ -180,6 +187,42 @@ namespace AutonautsCoop
             Host = new TcpPeer(c, Inbox);
             Plugin.Log("connected to " + ip + ":" + port);
         }
+    }
+
+    /// Test option: pretend the other player is far away. Every packet a machine receives waits LagMs (+ random
+    /// JitterMs) before the game sees it, so the round trip is about twice that. Order is kept (TCP and Steam's
+    /// reliable messages keep order too). Set with COOP_LAG / COOP_JITTER (milliseconds); off by default.
+    public static class NetSim
+    {
+        public static int LagMs = Env("COOP_LAG"), JitterMs = Env("COOP_JITTER");
+        static int Env(string k) => int.TryParse(Environment.GetEnvironmentVariable(k), out var v) && v > 0 ? v : 0;
+        public static bool On => LagMs > 0 || JitterMs > 0;
+        class Held { public float Due; public Packet P; }
+        static readonly Dictionary<Queue<Packet>, List<Held>> held = new Dictionary<Queue<Packet>, List<Held>>();
+        static readonly Dictionary<Queue<Packet>, float> lastDue = new Dictionary<Queue<Packet>, float>();
+        static readonly System.Random rng = new System.Random();
+
+        /// Next packet the game may see now (all of them at once when the option is off).
+        public static bool Take(Queue<Packet> inbox, out Packet p)
+        {
+            p = null;
+            if (!On) { lock (inbox) { if (inbox.Count == 0) return false; p = inbox.Dequeue(); return true; } }
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (!held.TryGetValue(inbox, out var l)) held[inbox] = l = new List<Held>();
+            lock (inbox)
+                while (inbox.Count > 0)
+                {
+                    lastDue.TryGetValue(inbox, out float ld);
+                    float due = Math.Max(now + (LagMs + (float)rng.NextDouble() * JitterMs) / 1000f, ld);
+                    lastDue[inbox] = due;
+                    l.Add(new Held { Due = due, P = inbox.Dequeue() });
+                }
+            if (l.Count == 0 || l[0].Due > now) return false;
+            p = l[0].P; l.RemoveAt(0);
+            return true;
+        }
+
+        public static bool Pending(Queue<Packet> inbox) => inbox != null && held.TryGetValue(inbox, out var l) && l.Count > 0;
     }
 
     public static class Gz

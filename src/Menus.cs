@@ -75,6 +75,7 @@ namespace AutonautsCoop
         {
             var o = ObjectTypeList.Instance.GetObjectFromUniqueID(n["b"].AsInt, false);
             var me = ObjectTypeList.Instance.GetObjectFromUniqueID(Sync.MyPlayerUID, false);
+            Diag.Log("host opens a screen for me: " + n.ToString() + " building " + (o ? Diag.Obj(o) : "#" + n["b"].AsInt + " NOT FOUND here"));
             var b = o ? o.GetComponent<Actionable>() : null;
             if (!b || !me) { Plugin.Log("menu open: building or player missing"); return; }
             b.m_Engager = me.GetComponent<Actionable>();   // menus talk to m_Engager

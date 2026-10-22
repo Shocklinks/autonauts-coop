@@ -1,5 +1,5 @@
 // AutonautsCoop - Coop.cs - session controller, snapshot join
-// Version 0.2.0 - 2026-10-20 - Created with Claude
+// Version 0.12.1 - 2026-10-21 - Created with Claude
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -70,9 +70,10 @@ namespace AutonautsCoop
             while (true)
             {
                 Packet p;
-                lock (Host.Inbox) { if (Host.Inbox.Count == 0) break; p = Host.Inbox.Dequeue(); }
+                if (!NetSim.Take(Host.Inbox, out p)) break;
                 switch (p.Type)
                 {
+                    case Msg.Echo: Diag.OnEcho(p); break;
                     case Msg.Hello:
                         var hello = JSON.Parse(Encoding.UTF8.GetString(p.Data));
                         if (p.From.Name != "?" || VersionCheck.IsRefused(p.From)) break;   // duplicate hello (connectionless wire)
@@ -146,9 +147,10 @@ namespace AutonautsCoop
             while (true)
             {
                 Packet p;
-                lock (Client.Inbox) { if (Client.Inbox.Count == 0) break; p = Client.Inbox.Dequeue(); }
+                if (!NetSim.Take(Client.Inbox, out p)) break;
                 switch (p.Type)
                 {
+                    case Msg.Echo: Diag.OnEcho(p); break;
                     case Msg.Snapshot:
                         PendingWorld = Gz.Unpack(p.Data);
                         Plugin.Log("snapshot received: " + PendingWorld.Length + " chars, loading");
@@ -161,7 +163,7 @@ namespace AutonautsCoop
                         if (inf["reject"] != null && !inf["reject"].IsNull) { Session.ClientLost((string)inf["reject"], true); return; }
                         if (inf["end"] != null && !inf["end"].IsNull) { Session.ClientLost((string)inf["end"], true); return; }
                         if (inf["note"] != null && !inf["note"].IsNull) { Menu.Toast(inf["note"]); break; }
-                        if (inf["hostlog"] != null && !inf["hostlog"].IsNull) { BugReport.ClientGotHostLog(inf["hostlog"]); break; }
+                        if (inf["hostlog"] != null && !inf["hostlog"].IsNull) { BugReport.ClientGotHostLog(inf["hostlog"], inf["hostdiag"] != null && !inf["hostdiag"].IsNull ? (string)inf["hostdiag"] : null); break; }
                         if (inf["you"] != null && !inf["you"].IsNull) { Sync.MyPlayerUID = inf["you"].AsInt; Locks.MyKey = inf["key"]; Plugin.Log("my player uid " + Sync.MyPlayerUID + " key " + Locks.MyKey); }
                         else if (inf["locks"] != null && !inf["locks"].IsNull) Locks.ClientReceive(inf["locks"].AsArray);
                         else if (inf["open"] != null && !inf["open"].IsNull) Menus.ClientOpen(inf);
@@ -200,6 +202,8 @@ namespace AutonautsCoop
                 SteamNet.Pump();
                 if (Role == Role.Host) { HostUpdate(); Sync.HostTick(); Shared.HostTick(); }
                 else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); Shared.ClientTick(); Look.ClientTick(); }
+                Diag.EchoTick();
+                Diag.Tick();
                 Session.Tick();   // after the inbox: a "lobby ended" message may sit right before the close
                 VersionCheck.Tick();
                 BugReport.Tick();

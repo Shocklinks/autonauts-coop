@@ -61,6 +61,7 @@ namespace AutonautsCoop
             if (uid >= 0 && Table.TryGetValue(uid, out string who) && (!byOwner.TryGetValue(owner, out int mine) || mine != uid))
             {
                 Plugin.Log("lock refused: " + name + " wants " + uid + " held by " + who);
+                Diag.Log("  " + name + " opened bot " + uid + " but " + who + " is programming it");
                 return false;
             }
             if (byOwner.TryGetValue(owner, out int old)) { Table.Remove(old); ownerOf.Remove(old); byOwner.Remove(owner); }

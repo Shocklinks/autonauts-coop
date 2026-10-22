@@ -1,5 +1,5 @@
 // AutonautsCoop - Extras.cs - joiner saving rules and the bug report bundle
-// Version 0.10.0 - 2026-10-21 - Created with Claude
+// Version 0.12.1 - 2026-10-21 - Created with Claude
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -54,11 +54,11 @@ namespace AutonautsCoop
     public static class BugReport
     {
         public static string LastPath, Status = "";
-        static string hostLog; static bool waitingHost; static float askedAt;
+        static string hostLog, hostDiag; static bool waitingHost; static float askedAt;
 
         public static void Begin()
         {
-            hostLog = null;
+            hostLog = null; hostDiag = null;
             if (Coop.Role == Role.Client && Coop.I.Client?.Host != null && Coop.I.Client.Host.Alive)
             {
                 var n = new JSONObject(); n["a"] = "hostlog";
@@ -70,7 +70,7 @@ namespace AutonautsCoop
             Write();
         }
 
-        public static void ClientGotHostLog(string b64) { hostLog = b64; if (waitingHost) { waitingHost = false; Write(); } }
+        public static void ClientGotHostLog(string b64, string diagB64) { hostLog = b64; hostDiag = diagB64; if (waitingHost) { waitingHost = false; Write(); } }
 
         public static void Tick()
         {
@@ -82,6 +82,7 @@ namespace AutonautsCoop
         {
             var bytes = Tail(Plugin.LogPath, 4 * 1024 * 1024);
             var n = new JSONObject(); n["hostlog"] = Convert.ToBase64String(Gz.Pack(Encoding.UTF8.GetString(bytes)));
+            if (Diag.LogPath != null) n["hostdiag"] = Convert.ToBase64String(Gz.Pack(Encoding.UTF8.GetString(Tail(Diag.LogPath, 8 * 1024 * 1024))));
             to.Send(Msg.Info, n.ToString());
             Plugin.Log("sent log to " + to.Name + " for a bug report");
         }
@@ -115,6 +116,8 @@ namespace AutonautsCoop
             sb.AppendLine("Objects " + (ObjectTypeList.Instance != null ? Coop.ObjectCount() : -1) + "  host scan ms " + Sync.LastScanMs.ToString("F1"));
             sb.AppendLine("Sync: inplace " + Sync.StatInPlace + " recreated " + Sync.StatRecreated + " created " + Sync.StatCreated + " removed " + Sync.StatRemoved
                 + " batches " + Sync.StatBatches + " resync " + Sync.StatResync + " errors " + Sync.StatErrors + " digests " + Sync.StatDigests + " fixes " + Sync.StatDigestFixes);
+            sb.AppendLine("Diagnostics " + (Diag.On ? "on" : "off") + ": " + Diag.Lines + " lines, clicks " + Diag.Clicks + ", marks " + Diag.Marks + (NetSim.On ? "  SIMULATED LAG " + NetSim.LagMs + "+" + NetSim.JitterMs + " ms" : ""));
+            if (Coop.Role == Role.Client && Coop.I.Client?.Host != null) sb.AppendLine("Round trip to host: " + (Coop.I.Client.Host.Rtt >= 0 ? (Coop.I.Client.Host.Rtt * 1000).ToString("F0") + " ms" : "?"));
             sb.AppendLine("Stored characters " + Persist.Parked.Count + "  seats " + Persist.Seats.Count + "  last disconnect: " + (Session.LastDisconnect ?? "-"));
             try { sb.AppendLine("State " + (GameStateManager.Instance ? GameStateManager.Instance.GetActualState().ToString() : "-") + "  scene " + UnityEngine.SceneManagement.SceneManager.GetActiveScene().name); } catch { }
             return sb.ToString();
@@ -130,6 +133,7 @@ namespace AutonautsCoop
                 var z = new Zip();
                 z.Add("info.txt", Encoding.UTF8.GetBytes(Info()));
                 z.Add("coop.log", Tail(Plugin.LogPath, 16 * 1024 * 1024));
+                if (Diag.LogPath != null) { z.Add("coop_diag.log", Tail(Diag.LogPath, 16 * 1024 * 1024)); z.Add("coop_diag.old.log", Tail(Diag.LogPath + ".old", 8 * 1024 * 1024)); }
                 z.Add("LogOutput.log", Tail(Path.Combine(Paths.BepInExRootPath, "LogOutput.log"), 8 * 1024 * 1024));
                 z.Add("Player.log", Tail(Path.Combine(Application.persistentDataPath, "Player.log"), 8 * 1024 * 1024));
                 z.Add("config.cfg", Tail(Path.Combine(Paths.ConfigPath, "autonauts.coop.cfg"), 64 * 1024));
@@ -139,6 +143,11 @@ namespace AutonautsCoop
                     catch (Exception e) { z.Add("host-coop.log", Encoding.UTF8.GetBytes("unreadable: " + e.Message)); }
                 }
                 else if (Coop.Role == Role.Client) z.Add("host-coop.log", Encoding.UTF8.GetBytes("the host did not answer"));
+                if (hostDiag != null)
+                {
+                    try { z.Add("host-coop_diag.log", Encoding.UTF8.GetBytes(Gz.Unpack(Convert.FromBase64String(hostDiag)))); }
+                    catch (Exception e) { z.Add("host-coop_diag.log", Encoding.UTF8.GetBytes("unreadable: " + e.Message)); }
+                }
                 File.WriteAllBytes(path, z.Finish());
                 LastPath = path;
                 Status = "Bug report saved: " + path;

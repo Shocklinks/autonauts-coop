@@ -148,10 +148,52 @@ namespace AutonautsCoop
             });
         }
 
+        static readonly List<Worker> wanderers = new List<Worker>(); static readonly List<TileCoord> wanderHome = new List<TileCoord>();
+        static float nextWander; static readonly System.Random wanderRng = new System.Random(11);
+        /// Host: keep the test bots walking between spots near where they started.
+        public static void HostWanderTick()
+        {
+            if (wanderers.Count == 0 || UnityEngine.Time.realtimeSinceStartup < nextWander) return;
+            nextWander = UnityEngine.Time.realtimeSinceStartup + 1.5f;
+            for (int i = 0; i < wanderers.Count; i++)
+            {
+                var w = wanderers[i];
+                if (!w || w.m_State != Farmer.State.None) continue;
+                var h = wanderHome[i];
+                var t = Sync.FreeTileNear(new TileCoord(h.x + wanderRng.Next(-3, 4), h.y + wanderRng.Next(-3, 4)), true);
+                w.RequestGoTo(t);
+            }
+        }
+
         public static bool HostTestOp(string a, JSONNode n, Peer from)
         {
             switch (a)
             {
+                case "test_wander":
+                {
+                    // test fixture: bots with energy that keep walking around the joiner (like a busy base)
+                    Sync.PeerPlayers.TryGetValue(from, out int pu);
+                    var pl = ObjectTypeList.Instance.GetObjectFromUniqueID(pu, false);
+                    var c = pl.GetComponent<TileCoordObject>().m_TileCoord;
+                    var u = new JSONArray(); var rnd = new System.Random(5);
+                    for (int i = 0; i < n["n"].AsInt; i++)
+                    {
+                        var at = Sync.FreeTileNear(new TileCoord(c.x + rnd.Next(-5, 6), c.y + rnd.Next(-5, 6)), true);
+                        var w = ObjectTypeList.Instance.CreateObjectFromIdentifier(ObjectType.Worker, at.ToWorldPositionTileCentered(), Quaternion.identity).GetComponent<Worker>();
+                        w.SetFrame(ObjectType.WorkerFrameMk0); w.SetDrive(ObjectType.WorkerDriveMk0); w.SetHead(ObjectType.WorkerHeadMk0);
+                        if (w.m_Energy <= 0f) w.AddEnergy(w.m_DriveInfo.m_Energy > 0 ? w.m_DriveInfo.m_Energy : 100f);
+                        wanderers.Add(w); wanderHome.Add(at); u.Add(w.m_UniqueID);
+                    }
+                    var r = new JSONObject(); r["tr"] = "wander"; r["u"] = u; from.Send(Msg.Info, r.ToString());
+                    Plugin.Log("[test] " + wanderers.Count + " wandering bots, energy " + (wanderers.Count > 0 ? wanderers[0].m_Energy.ToString("F0") : "-"));
+                    return true;
+                }
+                case "test_wanderstop":
+                {
+                    foreach (var w in wanderers) if (w) w.StopUsing();
+                    wanderers.Clear(); wanderHome.Clear();
+                    return true;
+                }
                 case "test_workbench":
                 {
                     Sync.PeerPlayers.TryGetValue(from, out int pu);
@@ -376,7 +418,7 @@ namespace AutonautsCoop
                 }
                 case "test_bugreport":
                     BugReport.LastPath = null; BugReport.Begin();
-                    TestReply(from, "bug", r => r["path"] = BugReport.LastPath ?? "");
+                    TestReply(from, "bug", r => { r["path"] = BugReport.LastPath ?? ""; r["marks"] = Diag.Marks; });
                     return true;
                 case "test_hostquit":
                     HostQuitRequested = true;
@@ -405,6 +447,89 @@ namespace AutonautsCoop
             return null;
         }
         static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
+        // ---- bot selection test (8b) ----
+        public static readonly List<int> wanderUids = new List<int>();
+        static int selTrial, selHits, selFrame; static Worker selTarget, selClicked; static float selT;
+        static int SelTrials = 6;
+        public static int SelHits => selHits;
+        public static void SelBegin(List<int> uids, int trials) { wanderUids.Clear(); wanderUids.AddRange(uids); SelTrials = trials; selTrial = 0; selHits = 0; selTarget = null; selT = 0; }
+        public static Vector3 BotScreen(Worker w) => CameraManager.Instance.m_Camera.WorldToScreenPoint(w.transform.position + Vector3.up * 1.0f);
+        public static bool OnScreen(Vector3 p) => p.z > 0 && p.x > 40 && p.y > 40 && p.x < Screen.width - 40 && p.y < Screen.height - 40;
+        /// Not hidden behind another bot or a tree (a player clicks the one they can see).
+        static bool Visible(Worker w)
+        {
+            var st = GameStateManager.Instance.GetCurrentState();
+            var go = st ? st.TestCollisionOffset(out _, true, false, true, false, true, BotScreen(w)) : null;   // the layers the whistle screen tests
+            return go && go.GetComponentInParent<Worker>() == w;
+        }
+        static Worker PickOnScreenBot(Worker not = null)
+        {
+            var list = new List<Worker>();
+            foreach (var u in wanderUids) { var b = Obj(u); var w = b ? b.GetComponent<Worker>() : null; if (w && w != not && OnScreen(BotScreen(w)) && Visible(w)) list.Add(w); }
+            if (list.Count == 0) return null;
+            return list[(selTrial * 5 + 3) % list.Count];
+        }
+        /// Hover each bot in turn like a player tracking it with the mouse; the game must put it under the cursor.
+        public static bool SelectTrials(float el)
+        {
+            var sel = GameStateSelectWorker.Instance;
+            if (!sel || GameStateManager.Instance.GetActualState() != GameStateManager.State.SelectWorker)
+            {
+                if (el < 5f) return false;
+                TestBot.Assert("client: whistle-select screen open", false, GameStateManager.Instance.GetActualState().ToString());
+                Diag.FakeMouse = null; Diag.FakeTrack = null; return true;
+            }
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (selTarget == null && el > 170f && selTrial >= Math.Min(3, wanderUids.Count))   // slow machine: judge on the tries done (step limit 240 s)
+            {
+                TestBot.Assert("client: hovering a busy bot picks it (" + selTrial + " tries in time)", selHits >= selTrial - 1, selHits + "/" + selTrial);
+                return true;
+            }
+            if (selTarget == null)
+            {
+                if (selTrial >= SelTrials)
+                {
+                    TestBot.Assert("client: hovering a busy bot picks it (" + SelTrials + " tries)", selHits >= SelTrials - 1, selHits + "/" + SelTrials);
+                    return true;
+                }
+                selTarget = PickOnScreenBot(Traverse.Create(sel).Field("m_CurrentTarget").GetValue<Worker>()); selT = now; selFrame = UnityEngine.Time.frameCount;   // a different bot each time
+                if (!selTarget && selTrial >= Math.Min(3, wanderUids.Count))
+                {
+                    TestBot.Assert("client: hovering a busy bot picks it (" + selTrial + " tries, ran out of other bots on screen)", selHits >= Math.Max(1, selTrial - 1), selHits + "/" + selTrial);
+                    return true;
+                }
+                if (!selTarget)
+                {
+                    if (UnityEngine.Time.realtimeSinceStartup > nextDragLog && wanderUids.Count > 0)
+                    {
+                        nextDragLog = UnityEngine.Time.realtimeSinceStartup + 3f;
+                        var b0 = Obj(wanderUids[0]); var cam = CameraManager.Instance.m_Camera;
+                        Plugin.Log("[test] no bot on screen: bot " + (b0 ? b0.transform.position.ToString() + " screen " + BotScreen(b0.GetComponent<Worker>()) : "missing") + " cam " + cam.transform.position + " " + cam.name + " " + cam.pixelWidth + "x" + cam.pixelHeight + " Screen " + Screen.width + "x" + Screen.height + " me " + Me().transform.position);
+                    }
+                    if (el > 20f) { TestBot.Assert("client: bots on screen for the selection test", false); Diag.FakeMouse = null; Diag.FakeTrack = null; return true; }
+                    return false;
+                }
+            }
+            if (!selTarget) { selTarget = null; selTrial++; return false; }   // rebuilt or gone mid-try
+            Diag.FakeMouse = BotScreen(selTarget); Diag.FakeTrack = selTarget.transform;
+            var cur = Traverse.Create(sel).Field("m_CurrentTarget").GetValue<Worker>();
+            // the screen needs the bot under the cursor for 10 frames in a row; give it 30 (this test machine draws ~2 fps)
+            if (cur == selTarget || (now - selT > 2.5f && UnityEngine.Time.frameCount - selFrame > 30))
+            {
+                bool hit = cur == selTarget;
+                if (hit) selHits++;
+                var tr = Traverse.Create(sel);
+                var bsl = tr.Field("m_BotSelectList").GetValue<BotSelectList>();
+                var plot = PlotManager.Instance.GetPlotAtTile(selTarget.m_TileCoord);
+                int atTile = plot ? plot.GetObjectsTypeAtTile(ObjectType.Worker, selTarget.m_TileCoord).Count : -1;
+                Plugin.Log("[test] select try " + selTrial + ": " + (hit ? "picked " : "MISSED ") + Diag.BotInfo(selTarget) + " in " + (now - selT).ToString("F2") + " s / " + (UnityEngine.Time.frameCount - selFrame) + " frames; cursor on " + Diag.Obj(cur)
+                    + " [sel state " + tr.Field("m_State").GetValue() + " next " + Diag.Obj(tr.Field("m_NextTarget").GetValue<Worker>()) + " timer " + tr.Field("m_NextTargetTimer").GetValue() + " list " + (bsl && bsl.gameObject.activeSelf) + " bots on its tile " + atTile + " found " + tr.Field("m_WorkersFound").GetValue() + "]"
+                    + " | " + Diag.Probe(Diag.Mouse));
+                selTarget = null; selTrial++;
+            }
+            return false;
+        }
+
         static ObjectType paletteType = ObjectTypeList.m_Total; static bool coverShown; static float lookYaw;
         static int groupId = -1, copyPlayer = -1, copyObjs = -1, autosBefore = -1, relocAtLeave = -1; static TileCoord undoTile, leaveTile, reloadTile; static float leaveAt;
         static WorkerGroup G(int id) => WorkerGroupManager.Instance.GetGroupFromID(id);
@@ -798,6 +923,64 @@ namespace AutonautsCoop
                 TestBot.Assert("client: bot's taught script visible on the joiner after closing the editor", ok, "instructions " + n);
                 return true;
             });
+            // 8b. pick moving bots with the mouse (whistle, hover, click), the way a player does, among a crowd of busy bots
+            s.Add(el => { Reply = null; HostReq("test_wander", n => n["n"] = 14); return true; });
+            s.Add(el =>
+            {
+                if ((Reply == null || (string)Reply["tr"] != "wander") && el < 20f) return false;
+                wanderUids.Clear();
+                if (Reply != null && (string)Reply["tr"] == "wander") foreach (JSONNode u in Reply["u"].AsArray) wanderUids.Add(u.AsInt);
+                TestBot.Assert("client: host made busy bots for the selection test", wanderUids.Count > 0, wanderUids.Count + " bots");
+                return true;
+            });
+            s.Add(el =>
+            {
+                int here = 0; foreach (var u in wanderUids) if (Obj(u)) here++;
+                if ((here < wanderUids.Count || el < 6f) && el < 30f) return false;   // let them get going
+                int moving = 0; foreach (var u in wanderUids) { var b = Obj(u); if (b && Sync.IsMovingOnClient(u)) moving++; }
+                Plugin.Log("[test] select test: " + here + " bots here, " + moving + " moving");
+                // look at them (earlier tests left the camera elsewhere)
+                var sum = Vector3.zero; int cnt = 0; foreach (var u in wanderUids) { var b = Obj(u); if (b) { sum += b.transform.position; cnt++; } }
+                if (cnt > 0) CameraManager.Instance.Focus(sum / cnt);
+                GameStateManager.Instance.SetState(GameStateManager.State.SelectWorker);   // what the whistle key does
+                selTrial = 0; selHits = 0; selTarget = null; selT = 0;
+                return true;
+            });
+            s.Add(el => el > 1f);
+            s.Add(el => SelectTrials(el));
+            s.Add(el =>
+            {
+                // click on the bot under the cursor: it must be selected (not "walk over to it")
+                var sel = GameStateSelectWorker.Instance;
+                if (!sel) { TestBot.Assert("client: whistle screen still open for the click", false); Diag.FakeMouse = null; Diag.FakeTrack = null; return true; }
+                var cur = Traverse.Create(sel).Field("m_CurrentTarget").GetValue<Worker>();
+                if (!cur)
+                {
+                    var w = PickOnScreenBot();
+                    if (w) { Diag.FakeMouse = BotScreen(w); Diag.FakeTrack = w.transform; }
+                    if (el < 60f) return false;
+                    TestBot.Assert("client: a bot under the cursor to click", false); Diag.FakeMouse = null; Diag.FakeTrack = null; return true;
+                }
+                selClicked = cur;
+                sel.SelectSingleBot(cur, cur.m_TileCoord);   // what the click does
+                return true;
+            });
+            s.Add(el =>
+            {
+                var gn = GameStateManager.Instance.GetCurrentState()?.GetComponent<GameStateNormal>();
+                var picked = gn ? gn.GetSelectedWorker() : null;
+                bool ok = selClicked && picked == selClicked && GameStateManager.Instance.GetActualState() == GameStateManager.State.Normal;
+                if (!ok && el < 3f) return false;
+                var ed = TeachWorkerScriptEdit.Instance;
+                TestBot.Assert("client: clicking a busy bot selects it and opens its program", ok && ed && ed.m_CurrentTarget == selClicked,
+                    "clicked " + Diag.Obj(selClicked) + " selected " + Diag.Obj(picked) + " editor " + (ed ? Diag.Obj(ed.m_CurrentTarget) : "-") + " screen " + GameStateManager.Instance.GetActualState());
+                Diag.FakeMouse = null; Diag.FakeTrack = null;
+                gn?.ClearSelectedWorkers();
+                if (GameStateManager.Instance.GetActualState() != GameStateManager.State.Normal) GameStateManager.Instance.SetState(GameStateManager.State.Normal);
+                HostReq("test_wanderstop");
+                return true;
+            });
+            s.Add(el => el > 3f);
             // 9. locks, rename, inventory transfers
             s.Add(el => { AskBot(); return true; });
             s.Add(el =>
@@ -1429,6 +1612,13 @@ namespace AutonautsCoop
                 string body = ok ? System.Text.Encoding.UTF8.GetString(System.IO.File.ReadAllBytes(BugReport.LastPath)) : "";
                 ok = ok && body.Contains("info.txt") && body.Contains("coop.log") && body.Contains("host-coop.log") && body.Contains("joined the game") && !body.Contains("the host did not answer");
                 TestBot.Assert("client: bug report zip has my logs and the host's", ok, BugReport.LastPath ?? "none");
+                // diagnostics: both sides' logs in the zip, with my actions, what the host did with them, and lag
+                bool diag = body.Contains("coop_diag.log") && body.Contains("host-coop_diag.log") && body.Contains("J send {\"a\":\"go\"") && body.Contains("H   go ") && body.Contains("stats 10s");
+                TestBot.Assert("client: diagnostics logs (mine and the host's) are in the bug report", diag);
+                var h = Coop.I.Client.Host;
+                TestBot.Assert("client: round-trip time measured", h.Rtt > 0f && h.Rtt < 30f, (h.Rtt * 1000).ToString("F0") + " ms" + (NetSim.On ? " (simulated " + NetSim.LagMs + "+" + NetSim.JitterMs + " ms each way)" : ""));
+                if (NetSim.On) TestBot.Assert("client: simulated lag shows in the round trip", h.Rtt * 1000f >= NetSim.LagMs * 2 * 0.9f, (h.Rtt * 1000).ToString("F0") + " ms");
+                Diag.Mark("test");
                 HostReq("test_bugreport"); Reply = null;
                 return true;
             });
@@ -1436,6 +1626,7 @@ namespace AutonautsCoop
             {
                 if (!Got("bug") && el < 10f) return false;
                 TestBot.Assert("host: bug report written on the host", Got("bug") && ((string)Reply["path"]).EndsWith(".zip"), Reply?.ToString());
+                TestBot.Assert("host: the joiner's F7 mark reached the host's diagnostics log", Got("bug") && Reply["marks"].AsInt >= 1, Reply?.ToString());
                 return true;
             });
             // 24. joiner saves: autosave is skipped, Save As writes my own copy
@@ -1575,3 +1766,4 @@ namespace AutonautsCoop
         }
     }
 }
+

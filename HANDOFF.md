@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.12.0 - 2026-10-22 - Created with Claude
+Version 0.12.1 - 2026-10-22 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -65,8 +65,11 @@ Commit as `Shocklinks <Shocklinks@users.noreply.github.com>`. Never use a real n
 | VersionCheck.cs | Refuse a joiner on a different mod/game version, with a reason |
 | Extras.cs | Joiner autosave/quicksave block; bug report zip |
 | Menu.cs | F8 window, toasts, "Host has ended the lobby." dialog |
-| Feel.cs | Joiner feel: real frame time for UI/camera (the sim clock is frozen), look-at-own-cursor, animators, buffered movement interpolation |
+| Feel.cs | Joiner feel: real frame time for UI/camera (the sim clock is frozen), look-at-own-cursor, animators, buffered movement interpolation, whistle bot picking (bots held still, drawn bot under cursor) |
+| Diag.cs | Diagnostics log `coop_diag.log` (clicks, actions and host outcomes, screens, 10 s stats, RTT via Msg.Echo, F7 mark); fake mouse for tests |
+| Kit.cs, Soak.cs | Windows test kit support: save dir redirect, no Steam, bind address; scenario on an existing save |
 | TestBot.cs, TestScript.cs, BigBase.cs, Multi.cs | Automated QA scenario (host/client bots), big-base stress test, three-player test |
+| kit/ | Windows test kit: RunTests.bat + kit.ps1 (two copies on the owner's PC, full/lag/own-save tests, results in kit\results) |
 | test/protobot.py | A joiner that speaks the TCP protocol without the game (third player in COOP_MULTI; three game instances don't fit in sandbox memory) |
 
 ## Environment setup (cloud sandbox, Linux)
@@ -89,7 +92,8 @@ Commit as `Shocklinks <Shocklinks@users.noreply.github.com>`. Never use a real n
 COOP_TRANSPORT=udp ./test/run.sh "<game copy>" "<BepInEx>" <work> 2400  # Steam framing over UDP stand-in
 COOP_BIG=1 ./test/run.sh "<game copy>" "<BepInEx>" <work> 1800      # big-base stress test (small map)
 COOP_MULTI=1 ./test/run.sh "<game copy>" "<BepInEx>" <work> 1500    # 3 players: host + game joiner + test/protobot.py
-./tools/package.sh "<BepInEx>" out/AutonautsCoop.dll 0.10.0 AutonautsCoop-0.10.0.zip   # player download
+COOP_LAG=150 COOP_JITTER=50 COOP_NOSTEAM=1 COOP_BIND=127.0.0.1 COOP_DATA_BASE=<work> ./test/run.sh ... 3000   # lag + kit switches
+./tools/package.sh "<BepInEx>" out/AutonautsCoop.dll 0.12.1 AutonautsCoop-0.12.1.zip   # player download
 ```
 
 Running the tests:
@@ -97,7 +101,7 @@ Running the tests:
 - Don't edit `src/` while a run is about to start its build.
 - Results are in `<work>/{host,client}/BepInEx/coop_test_*.txt` and `coop.log`.
 
-**Last results (0.12.0):** 106/106 TCP, 89/89 UDP, 15/15 three-player, 7/7 big-base.
+**Last results (0.12.1):** 112/112 TCP, 95/95 UDP, 113/113 TCP with 150+50 ms simulated lag and the kit switches, 11/11+5/5 own-save (soak) scenario, 15/15 three-player (0.11), 7/7 big-base.
 
 Sandbox limits:
 - Two medium-map game instances (about 3 GB each) get OOM-killed, so the big test uses a small map.
@@ -113,6 +117,16 @@ Sandbox limits:
 6. Hub: no change needed for normal releases (the entry links to this repo). Update PR #112, or open a new hub PR
    after it merges, only for milestones: a status change, a real Steam test result, or a major feature or known issue.
    For that, also update `games/autonauts/README.md`/`NOTES.md` and the entry's `notes`/`checked` fields.
+
+## Testing on the owner's PC (test kit)
+
+- The owner's linked computer has only a Linux VM shell: it can't run the Windows game. The kit does instead.
+- Put the release zip in `kit\` (gitignored) and have the owner double-click `kit\RunTests.bat`.
+- Results land in `kit\results\<date>-<mode>\` (gitignored): `summary.txt`, both sides' `coop_test_*.txt`, `coop.log`,
+  `coop_diag.log`, Unity `player.log`. Read them through the linked folder.
+- The sandbox runs ~2 fps under Wine: tests that need N frames must count frames, not seconds.
+- `coop_diag.log` is the first place to look in a real-session bug report: "send"/"from" lines pair each joiner
+  action with the host's outcome, "rebuilt"/"didn't match" lines show sync churn, "stats 10s" lines show fps/RTT.
 
 ## Open work (priority order)
 

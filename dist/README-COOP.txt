@@ -41,3 +41,5 @@ STATUS
 - Steam invites: NOT YET TESTED on real Steam.
 - Host-only: changing game speed.
 Bug reports: F8 > Save bug report, then send the zip from BepInEx\bugreports (a joiner's zip includes the host's log).
+When something goes wrong, press F7 right away: it marks the moment in both players' diagnostics logs
+(BepInEx\coop_diag.log, included in the bug report zip).

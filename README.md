@@ -3,9 +3,9 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.0**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.1**. Not affiliated with Denki or Curve Games. Contains no game files.
 
-## What works (automated two-instance test: 106/106 over TCP, 89/89 over the Steam-style wire, 15/15 three-player, 7/7 big-base stress test)
+## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
 - Join a running world: the host sends its save in memory; the joiner loads it. Object counts and a whole-world checksum match.
 - Joiner walks, picks up, drops, picks up tools and chops trees; the host sees it.
@@ -69,6 +69,29 @@ Status: **alpha 0.12.0**. Not affiliated with Denki or Curve Games. Contains no 
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
 
+## 0.12.1: picking bots, diagnostics, test kit
+
+- **Picking bots with the whistle works on the joiner.** The whistle screen only picks a bot that stays under the
+  cursor for 10 frames and finds it through the tile it is registered on. On the joiner, bots kept moving (the host's
+  bots don't stop to listen) and are drawn a moment behind their tile, so busy bots were almost impossible to pick,
+  and a click made you walk to the bot instead. Now, while the joiner's whistle screen is open, their bots stand
+  still where they are drawn (as listening bots do in single player), all count as listening, and the screen gets the
+  bot actually drawn under the cursor. New test: 14 busy bots, hover each, click one; it must open its program.
+- **Diagnostics log** (`BepInEx\coop_diag.log`, on by default, included in the F8 bug report from both sides): every
+  click and what was under the cursor, every action a joiner sends and what the host did with it (done, target
+  missing, held while busy, refused), screen changes, bot selection, script editor target, toasts, objects rebuilt,
+  and every 10 s: frame rate, round-trip time, traffic and sync cost. **F7** marks "something went wrong here" in
+  both players' logs. Config: `[Debug] Diagnostics`, `MarkKey`.
+- **Windows test kit** (`kit\RunTests.bat`): runs a host and a joiner copy of the game on one PC with the test bots:
+  the full test, the full test with simulated internet lag, or a test on your own save (join, walk, pick bots, open a
+  program, watch, compare worlds). Your install and saves are only read. See `kit\README.txt`.
+- **Bots no longer rebuilt over and over on the joiner.** The game saves decimals as whole hundredths and loses one
+  on each load/save round trip (81.52 energy loads, then saves as 81.51). The joiner's check after each update saw
+  that as a mismatch and rebuilt the bot instead: every working bot, every update (60-90 rebuilds per 10 s with 14
+  bots in the test). Values from the host now load so they save back exactly. Also, the whistle screen no longer
+  pauses the joiner's copies of the host's bots locally (that changed their state and caused the same rebuilds).
+- **Simulated lag** for tests: `COOP_LAG` / `COOP_JITTER` (ms, each way) delay every received packet.
+
 ## Not done / known issues
 
 - Planning areas sync when the editor leaves planning mode (and while drawing); two people editing areas at the
@@ -119,6 +142,12 @@ player download (BepInEx + plugin + README-COOP.txt, extracts into the game fold
 with separate prefixes, and drives them with in-game bots (`COOP_TEST=host|client`) through the real input path.
 Results: `<work dir>/{host,client}/BepInEx/coop_test_*.txt`. Add `COOP_TRANSPORT=udp` to test the Steam framing path,
 `COOP_MULTI=1` for the three-player test (host + game joiner + `test/protobot.py`), or `COOP_BIG=1` for the big-base stress test (`COOP_BIG_BOTS`, `COOP_BIG_BUILDINGS`, `COOP_BIG_ITEMS` set its size).
+
+Kit/test switches (environment variables, never set in normal play): `COOP_LAG`/`COOP_JITTER` simulated lag,
+`COOP_DATA_BASE` (run.sh) / `COOP_DATA` separate save folders, `COOP_NOSTEAM=1` don't start Steam, `COOP_BIND` host
+address, `COOP_SOAK=1 COOP_SAVE=<name>` test on an existing save (`src/Soak.cs`).
+
+On Windows: `kit\RunTests.bat` does the same with two copies on one PC (see `kit\README.txt`).
 
 The test copies get a `steam_appid.txt` so they start without the Steam client. Test use only; never ship it.
 

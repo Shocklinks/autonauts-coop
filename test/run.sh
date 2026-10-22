@@ -1,6 +1,6 @@
 #!/bin/bash
 # AutonautsCoop QA: two game instances under Wine/Xvfb, separate prefixes (separate saves).
-# Version 0.0.2 - 2026-10-20 - Created with Claude
+# Version 0.12.1 - 2026-10-21 - Created with Claude
 # Usage: test/run.sh <base game dir> <bepinex dir> <work dir> [timeout s]
 set -u
 BASE="$1"; BEP="$2"; WORK="$3"; TMO="${4:-420}"
@@ -21,7 +21,9 @@ sleep 2
 W=1280; H=720
 launch() { # role display
   local T="$WORK/$1"
-  (cd "$T" && COOP_TEST=$1 DISPLAY=$2 WINEPREFIX="$WORK/prefix_$1" WINEDEBUG=-all WINEDLLOVERRIDES="winhttp=n,b" \
+  # COOP_DATA_BASE=<dir>: each copy keeps its saves in <dir>/data_<role> (as the Windows test kit does)
+  local extra=""; [ -n "${COOP_DATA_BASE:-}" ] && { mkdir -p "$COOP_DATA_BASE/data_$1/Saves"; extra="COOP_DATA=Z:$(echo "$COOP_DATA_BASE/data_$1" | tr / '\\')"; }
+  (cd "$T" && env $extra COOP_TEST=$1 DISPLAY=$2 WINEPREFIX="$WORK/prefix_$1" WINEDEBUG=-all WINEDLLOVERRIDES="winhttp=n,b" \
     timeout "$TMO" wine Autonauts.exe -logFile "Z:$(echo $T/player.log | tr / '\\')" -screen-fullscreen 0 -screen-width $W -screen-height $H >/dev/null 2>&1) &
 }
 launch host :91; sleep 5; launch client :92

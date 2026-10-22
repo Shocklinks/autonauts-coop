@@ -1,5 +1,5 @@
 // AutonautsCoop - Feel.cs - joiner-side fixes from the first real Steam test (0.12.0)
-// Version 0.12.0 - 2026-10-21 - Created with Claude
+// Version 0.12.1 - 2026-10-21 - Created with Claude
 //
 // The joiner's simulation is frozen with TimeManager.EnableNormalTime(false), which zeroes m_NormalDelta for the whole
 // game. Plenty of UI and camera code also counts time with m_NormalDelta, so on the joiner:
@@ -193,5 +193,90 @@ namespace AutonautsCoop
             }
             return true;
         }
+    }
+
+    // ---------------- picking bots with the whistle on the joiner ----------------
+    // The whistle screen (GameStateSelectWorker) only lets you pick a bot that has stopped to listen, and finds it
+    // through the tile under the cursor (Tile.m_Farmer). On the joiner neither held up:
+    //   - bots stop to listen in the joiner's own simulation, which is frozen, and every sync update of a busy bot
+    //     reset it, so a busy bot was "not listening": hovering didn't pick it and clicking made you walk to it
+    //   - a moving bot is drawn a moment behind the tile it is registered on, so the tile under the cursor often
+    //     pointed at no bot, or at the wrong one
+    // Now, on the joiner, every bot counts as listening while the whistle screen is open (as all bots do in single
+    // player), and the bot drawn under the cursor is the one the screen finds.
+    static class SelectFix { public static bool Off = Environment.GetEnvironmentVariable("COOP_NOFIX_SELECT") == "1"; }   // tests: show the old behaviour
+
+    /// While the joiner's whistle screen is open, its bots stand still where they are drawn, as listening bots do in
+    /// single player (on the host they keep working). A moving, hopping bot never stayed under the cursor for the
+    /// ten frames the screen needs to pick it.
+    public static class SelectHold
+    {
+        static readonly Dictionary<int, KeyValuePair<Vector3, Quaternion>> held = new Dictionary<int, KeyValuePair<Vector3, Quaternion>>();
+        static int frame = -1; static bool active;
+        public static bool Active
+        {
+            get
+            {
+                if (frame == Time.frameCount) return active;
+                frame = Time.frameCount;
+                var gsm = GameStateManager.Instance;
+                active = !SelectFix.Off && Coop.Role == Role.Client && Coop.I.ClientLoaded && gsm && gsm.GetActualState() == GameStateManager.State.SelectWorker;
+                if (!active && held.Count > 0) held.Clear();
+                return active;
+            }
+        }
+        /// Sync.ClientFrame: true = this object is held still this frame (its transform is set here).
+        public static bool Hold(BaseClass b, Vector3 basePos)
+        {
+            if (!(b is Worker) || !Active) return false;
+            if (!held.TryGetValue(b.m_UniqueID, out var h)) held[b.m_UniqueID] = h = new KeyValuePair<Vector3, Quaternion>(basePos, b.transform.rotation);
+            b.transform.position = h.Key; b.transform.rotation = h.Value;
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(Worker), nameof(Worker.GetIsListening))]
+    static class P_JoinerBotsListen
+    {
+        static void Postfix(Worker __instance, ref bool __result)
+        {
+            if (__result || SelectFix.Off || Coop.Role != Role.Client || !Coop.I.ClientLoaded || __instance.m_BeingHeld) return;
+            var gsm = GameStateManager.Instance;
+            if (gsm && gsm.GetActualState() == GameStateManager.State.SelectWorker) __result = true;
+        }
+    }
+
+    // The whistle screen asks every bot to stop and listen (and lets them go when it closes). On the joiner those bots
+    // are copies of the host's: pausing them locally changed their saved state, so every sync update failed its
+    // check and the bot was rebuilt (dozens a second with a busy base). Listening is handled above instead.
+    [HarmonyPatch]
+    static class P_JoinerNoLocalPause
+    {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(Worker), nameof(Worker.RequestPause));
+            yield return AccessTools.Method(typeof(Worker), nameof(Worker.Unpause));
+        }
+        static bool Prefix() => SelectFix.Off || Coop.Role != Role.Client || !Coop.I.ClientLoaded || Sync.Applying;
+    }
+
+    [HarmonyPatch(typeof(GameStateSelectWorker), "UpdateIdle")]
+    static class P_JoinerPickDrawnBot
+    {
+        /// The bot the whistle screen's cursor test returns this frame (P_FakeMouse in Diag.cs hands it over).
+        public static Worker Override;
+        static void Prefix(GameStateSelectWorker __instance)
+        {
+            Override = null;
+            if (SelectFix.Off || Coop.Role != Role.Client || !Coop.I.ClientLoaded) return;
+            // what is drawn under the cursor: a bot's body (any bot layer), else the bot standing closest to where the
+            // cursor ray lands on the ground (the ray passes through the body and lands just behind it)
+            var go = __instance.TestCollisionOffset(out var cp, true, false, true, false, true, Diag.Mouse);
+            if (!go) return;
+            var w = go.GetComponentInParent<Worker>();
+            if (!w) w = Diag.NearestWorker(cp, Tile.m_Size * 0.9f, out _);
+            if (w && !w.m_BeingHeld) Override = w;
+        }
+        static void Finalizer() { Override = null; }
     }
 }

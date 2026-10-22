@@ -259,7 +259,7 @@ namespace AutonautsCoop
             if (Coop.Role == Role.Client)
             {
                 var h = Coop.I.Client?.Host;
-                if (h != null && !h.Alive) { ClientLost("connection closed"); return; }
+                if (h != null && !h.Alive && !NetSim.Pending(Coop.I.Client.Inbox)) { ClientLost("connection closed"); return; }
                 // joiner quit to the main menu on its own
                 if (Coop.I.ClientLoaded && SceneManager.GetActiveScene().name == "MainMenu") { ResetAll(); Plugin.Log("left the session"); }
             }

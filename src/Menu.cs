@@ -37,7 +37,7 @@ namespace AutonautsCoop
         static string toast; static float toastUntil;
         public static string LastToast;
         public static readonly List<string> Toasts = new List<string>();   // tests
-        public static void Toast(string s) { toast = s; LastToast = s; Toasts.Add(s); toastUntil = Time.realtimeSinceStartup + 4f; Plugin.Log("toast: " + s); }
+        public static void Toast(string s) { toast = s; LastToast = s; Toasts.Add(s); toastUntil = Time.realtimeSinceStartup + 4f; Plugin.Log("toast: " + s); Diag.Log("toast: " + s); }
 
         void OnGUI()
         {

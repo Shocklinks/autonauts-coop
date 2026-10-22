@@ -291,7 +291,7 @@ namespace AutonautsCoop
             {
                 var p = pendingGo[uid];
                 var o = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
-                if (!o || Time.realtimeSinceStartup > p.Until) { pendingGo.Remove(uid); continue; }
+                if (!o || Time.realtimeSinceStartup > p.Until) { pendingGo.Remove(uid); Diag.Log("  go: held click dropped (still busy after 3 s)"); continue; }
                 if (!Busy(o.GetComponent<Farmer>())) { pendingGo.Remove(uid); HostApplyInput(p.From, p.Json); }
             }
         }
@@ -309,6 +309,8 @@ namespace AutonautsCoop
         public static void HostApplyInput(Peer from, string json)
         {
             var n0 = JSON.Parse(json);
+            Diag.In(from, n0);
+            if ((string)n0["a"] == "mark") { Diag.HostMark(from); return; }
             if ((string)n0["a"] == "chk")
             {
                 // send everything that changed first (stationary changes are otherwise picked up within ~5 s)
@@ -365,6 +367,7 @@ namespace AutonautsCoop
                 st["step"] = n0["step"]; r["botstate"] = st; from.Send(Msg.Info, r.ToString());
                 return;
             }
+            if (TestBot.Active && Soak.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && BigBase.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && Multi.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && TestScript.HostTestOp((string)n0["a"], n0, from)) return;
@@ -385,11 +388,11 @@ namespace AutonautsCoop
             }
             if ((string)n0["a"] == "lock") { Locks.HostSet("peer" + from.Id, from.Name, n0["w"].AsInt); return; }
             if ((string)n0["a"] == "bot_script" || (string)n0["a"] == "learn_start" || (string)n0["a"] == "teach_on" || ((string)n0["a"]).StartsWith("wi_"))
-                if (!Locks.HostAllowed("peer" + from.Id, n0["w"].AsInt)) { Plugin.Log((string)n0["a"] + " refused: bot locked by " + Locks.Table[n0["w"].AsInt]); return; }
+                if (!Locks.HostAllowed("peer" + from.Id, n0["w"].AsInt)) { Plugin.Log((string)n0["a"] + " refused: bot locked by " + Locks.Table[n0["w"].AsInt]); Diag.Log("  refused: bot " + n0["w"].AsInt + " is being programmed by " + Locks.Table[n0["w"].AsInt]); return; }
             if (Build.HostApply((string)n0["a"], n0, from)) return;
-            if (!PeerPlayers.TryGetValue(from, out int uid)) return;
+            if (!PeerPlayers.TryGetValue(from, out int uid)) { Diag.Log("  ignored: " + from.Name + " has no character yet"); return; }
             var fpObj = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
-            if (!fpObj) return;
+            if (!fpObj) { Diag.Log("  ignored: " + from.Name + "'s character " + uid + " is missing"); return; }
             var fp = fpObj.GetComponent<FarmerPlayer>();
             var n = JSON.Parse(json);
             if (Teach.HostApply((string)n["a"], n, fp)) return;
@@ -406,12 +409,17 @@ namespace AutonautsCoop
                     int t = n["t"].AsInt;
                     // Plot UIDs are assigned locally on each machine, so plots are sent as "the plot at dest".
                     BaseClass target = t >= 0 ? ObjectTypeList.Instance.GetObjectFromUniqueID(t, false) : t == -2 ? PlotManager.Instance.GetPlotAtTile(dest) : null;
-                    if (t >= 0 && !target) { Plugin.Log("input target " + t + " not found on host"); break; }
+                    if (t >= 0 && !target) { Plugin.Log("input target " + t + " not found on host"); Diag.Log("  go: target #" + t + " NOT FOUND on host (joiner's copy is stale)"); break; }
                     // Mid-action (picking up, chopping...) the game ignores clicks it can't abort. The joiner can't
                     // see that animation reliably, so hold the latest click and retry for a moment.
-                    if (Busy(fp)) { pendingGo[uid] = new PendingGo { Json = json, From = from, Until = Time.realtimeSinceStartup + 3f }; break; }
+                    if (Busy(fp)) { if (!pendingGo.ContainsKey(uid)) Diag.Log("  go: " + from.Name + " is busy (" + fp.m_State + "), holding the click up to 3 s"); pendingGo[uid] = new PendingGo { Json = json, From = from, Until = Time.realtimeSinceStartup + 3f }; break; }
                     pendingGo.Remove(uid);
                     fp.GoToAndAction(dest, target ? target.GetComponent<Actionable>() : null, (AFO.AT)n["k"].AsInt);
+                    if (Diag.On)
+                    {
+                        string ti = target is Worker tw ? Diag.BotInfo(tw) : Diag.Obj(target);
+                        Diag.Log("  go " + dest.x + "," + dest.y + " k" + n["k"].AsInt + " target " + ti + " -> " + from.Name + " state " + fp.m_State + (fp.m_EngagedObject ? " engaged " + Diag.Obj(fp.m_EngagedObject) : ""));
+                    }
                     if (TestBot.Active)
                     {
                         var tl = TileManager.Instance.GetTile(dest);
@@ -428,6 +436,7 @@ namespace AutonautsCoop
         static readonly Dictionary<int, float> targetRot = new Dictionary<int, float>();
         static readonly Dictionary<int, Vector3> basePos = new Dictionary<int, Vector3>();
         static readonly Dictionary<int, float> movingUntil = new Dictionary<int, float>();
+        public static bool IsMovingOnClient(int uid) => movingUntil.TryGetValue(uid, out float t) && Time.realtimeSinceStartup < t + 1f;
 
         public static void QueueEarlyDelta(byte[] d) { early.Add(d); }
 
@@ -612,7 +621,7 @@ namespace AutonautsCoop
                     catch (Exception e) { Plugin.Log("in-place nested load failed for " + o["ID"] + ": " + e.Message); }
                     foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); }
                 }
-                if (b) { Destroy(b); StatRecreated++; Count("nested:" + (string)o["ID"]); }
+                if (b) { Destroy(b); StatRecreated++; Count("nested:" + (string)o["ID"], uid); }
                 else StatCreated++;
                 Create(o);
                 return;
@@ -625,7 +634,7 @@ namespace AutonautsCoop
                 Plugin.Log("detaching " + o["ID"] + " " + uid + " from " + holder.m_TypeIdentifier + " " + holder.m_UniqueID);
                 var tree = holder.GetComponent<MyTree>();
                 if (tree && tree.m_BeesNest == b) tree.m_BeesNest = null;
-                Destroy(b); StatRecreated++; Count("detach:" + (string)o["ID"]);
+                Destroy(b); StatRecreated++; Count("detach:" + (string)o["ID"], uid);
                 Create(o);
                 return;
             }
@@ -656,7 +665,7 @@ namespace AutonautsCoop
                     }
                     catch (Exception e) { Plugin.Log("in-place load failed for " + o["ID"] + ": " + e.Message); }
                 }
-                Count((string)o["ID"]);
+                Count((string)o["ID"], uid);
                 if (b) Destroy(b);
                 StatRecreated++;
             }
@@ -709,8 +718,12 @@ namespace AutonautsCoop
         static readonly HashSet<string> diffLogged = new HashSet<string>();
         static void LogDiff(string type, string want, string got)
         {
-            if (!diffLogged.Add(type)) return;
             int i = 0; while (i < want.Length && i < got.Length && want[i] == got[i]) i++;
+            // one log line per object type and differing field (the key just before the first difference)
+            int q = want.LastIndexOf("\":", Math.Min(i, want.Length - 1), StringComparison.Ordinal); int q0 = q > 0 ? want.LastIndexOf('"', q - 1) : -1;
+            string field = q0 >= 0 ? want.Substring(q0 + 1, q - q0 - 1) : "?";
+            if (!diffLogged.Add(type + "." + field)) return;
+            Diag.Log("in-place update of " + type + " didn't match (field " + field + "): rebuilt instead");
             int from = Math.Max(0, i - 60);
             Plugin.Log("in-place mismatch " + type + " at " + i + "\n  want: " + want.Substring(from, Math.Min(200, want.Length - from)) + "\n  got:  " + got.Substring(from, Math.Min(200, got.Length - from)));
         }
@@ -733,7 +746,14 @@ namespace AutonautsCoop
             catch (Exception e) { Plugin.Log("cleanup " + uid + ": " + e.Message); }
         }
 
-        static void Count(string k) { RecreatedByType[k] = RecreatedByType.TryGetValue(k, out int c) ? c + 1 : 1; }
+        static void Count(string k, int uid = -1)
+        {
+            RecreatedByType[k] = RecreatedByType.TryGetValue(k, out int c) ? c + 1 : 1;
+            RecreatedByTypeWindow[k] = RecreatedByTypeWindow.TryGetValue(k, out int w) ? w + 1 : 1;
+            if (uid >= 0) { RecreatedUid[uid] = RecreatedUid.TryGetValue(uid, out int u) ? u + 1 : 1; if (Diag.On) Diag.Log("rebuilt " + k + "#" + uid + " (could not update in place)"); }
+        }
+        public static readonly Dictionary<string, int> RecreatedByTypeWindow = new Dictionary<string, int>();   // diagnostics: last 10 s
+        public static readonly Dictionary<int, int> RecreatedUid = new Dictionary<int, int>();
 
         static readonly System.Text.RegularExpressions.Regex UidRx = new System.Text.RegularExpressions.Regex("\"UID\"\\s*:\\s*(-?\\d+)");
         /// All UIDs mentioned in the object's JSON except its own (one occurrence of the root UID is skipped).
@@ -826,6 +846,7 @@ namespace AutonautsCoop
                 // steady motion even when packets arrive in bursts (internet / Steam relay)
                 if (!Smooth.Sample(kv.Key, out var bp, out float ry, out bool walking)) { bp = kv.Value; ry = targetRot.TryGetValue(kv.Key, out var r0) ? r0 : t.eulerAngles.y; walking = false; }
                 basePos[kv.Key] = bp;
+                if (SelectHold.Hold(b, bp)) continue;   // whistle screen open: bots stand still (Feel.cs)
                 t.position = walking ? bp + Vector3.up * Anim.Hop(b, Time.realtimeSinceStartup) : bp;
                 // my own idle character faces my cursor (local); everyone else faces where the host says
                 var f = b as Farmer;
@@ -889,6 +910,27 @@ namespace AutonautsCoop
             if (__result[0] && __result[0].m_UniqueID == mine) return;
             int i = __result.FindIndex(b => b && b.m_UniqueID == mine);
             if (i > 0) { var b = __result[i]; __result.RemoveAt(i); __result.Insert(0, b); }
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // The game saves floats as (int)(value * 100) and loads them as int / 100f. Loading 8152 gives 81.52f, which saves
+    // back as 8151 (81.52f * 100 = 8151.9995, truncated). On the joiner that one-unit drift made every in-place update
+    // of a bot with part of its energy left fail its check, so the bot was rebuilt instead (dozens a second in a busy
+    // base: choppy, and bots flickered out from under the cursor). While applying host data, load a value that saves
+    // back exactly.
+    [HarmonyLib.HarmonyPatch(typeof(JSONUtils), nameof(JSONUtils.GetAsFloat))]
+    static class P_ExactFloatRoundTrip
+    {
+        static void Postfix(JSONNode Node, string Name, ref float __result)
+        {
+            if (!Sync.Applying || Coop.Role != Role.Client) return;
+            var j = Node[Name];
+            if (j == null || j.IsNull) return;
+            int n = j.AsInt;
+            __result = (n >= 0 ? n + 0.25f : n - 0.25f) / 100f;
         }
     }
 }

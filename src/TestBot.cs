@@ -1,5 +1,5 @@
 // AutonautsCoop - TestBot.cs - automated two-instance QA driver (COOP_TEST=host|client)
-// Version 0.0.2 - 2026-10-20 - Created with Claude
+// Version 0.12.1 - 2026-10-21 - Created with Claude
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -49,19 +49,21 @@ namespace AutonautsCoop
                 t0 = Time.realtimeSinceStartup;
                 resultPath = Path.Combine(Paths.BepInExRootPath, "coop_test_" + Mode + ".txt");
                 File.WriteAllText(resultPath, "");
-                if (Multi.On) { if (Mode == "host") Multi.BuildHost(steps); else Multi.BuildClient(steps); }
+                if (Soak.On) { if (Mode == "host") Soak.BuildHost(steps); else Soak.BuildClient(steps); }
+                else if (Multi.On) { if (Mode == "host") Multi.BuildHost(steps); else Multi.BuildClient(steps); }
                 else if (Big) { if (Mode == "host") BigBase.BuildHost(steps); else BigBase.BuildClient(steps); }
                 else if (Mode == "host") TestScript.BuildHost(steps); else TestScript.BuildClient(steps);
                 stepT = Time.realtimeSinceStartup;
             }
             SkipCeremonies();
+            if (Mode == "host" && Coop.Role == Role.Host) TestScript.HostWanderTick();
             if (step >= steps.Count) { if (step != 9999) Done(); return; }
             float el = Time.realtimeSinceStartup - stepT;
             bool done;
             try { done = steps[step](el); }
             catch (Exception e) { Plugin.Log(e.ToString()); Assert("step " + step + " threw", false, e.Message); done = true; }
             if (done) { step++; stepT = Time.realtimeSinceStartup; Plugin.Log("[test] step " + step + " at " + (Time.realtimeSinceStartup - t0).ToString("F1") + "s"); }
-            else if (el > (Mode == "host" ? 1600f : Big ? 900f : 240f)) { Assert("step " + step + " timeout", false); step = steps.Count; }
+            else if (el > (Mode == "host" ? 1600f : Big || Soak.On ? 900f : 240f)) { Assert("step " + step + " timeout", false); step = steps.Count; }
         }
 
         static float nextSkip, nextStateLog;

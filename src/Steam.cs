@@ -174,6 +174,7 @@ namespace AutonautsCoop
         public byte[] Feed(byte[] piece)
         {
             LastHeard = Time.realtimeSinceStartup;
+            System.Threading.Interlocked.Add(ref BytesRecv, piece.Length);
             if (piece.Length < 1) return null;
             if (piece[0] == Whole) { assembling.Clear(); var f = new byte[piece.Length - 1]; Buffer.BlockCopy(piece, 1, f, 0, f.Length); return f; }
             for (int i = 1; i < piece.Length; i++) assembling.Add(piece[i]);
