@@ -1,5 +1,5 @@
 AutonautsCoop test kit
-Version 0.12.5 - 2026-10-22 - Created with Claude
+Version 0.12.15 - 2026-10-23 - Created with Claude
 
 What it does
   Runs two copies of Autonauts on this PC, a host and a joiner. The mod's built-in test bots play both
@@ -37,3 +37,8 @@ Running tests without anyone at the PC (watcher)
   3. The watcher only ever runs this test kit, with only these settings: mode (full/save), save (must be one of your
      saves), lag, jitter, minutes, watch. Close its window to stop it.
   The PC must stay logged in (locking the screen is fine; signing out or sleep stops it).
+  4. A request with "action=shutdown" shuts the PC down after the requests before it (60 s warning; cancel with
+     "shutdown /a" in a command prompt). Claude only sends it when you ask.
+  5. Each results folder has digest.txt: the result, errors, frame/garbage stats, rebuilds and world-check
+     differences in one short file. The .done file carries it too.
+  6. When watch.ps1 is updated, the watcher restarts itself with the new version.

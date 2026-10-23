@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - kit.ps1
-# Version 0.12.2 - 2026-10-22 - Created with Claude
+# Version 0.12.15 - 2026-10-23 - Created with Claude
 #
 # Runs two copies of Autonauts on this PC (a host and a joiner), both driven by the mod's built-in test bots,
 # and collects the results in kit\results\<date>-<mode>\.
@@ -147,6 +147,64 @@ function Collect {
     }
 }
 
+# ---------------- digest: the few lines that matter, in one small file ----------------
+function Cut([string]$s, [int]$n) { if ($s.Length -le $n) { return $s } return $s.Substring(0, $n) + "..." }
+function Write-Digest([string]$dir, $summary) {
+    $d = New-Object System.Collections.Generic.List[string]
+    foreach ($l in $summary) { if ($l -ne "") { $d.Add($l) } }
+    foreach ($r in @("host", "client")) {
+        $d.Add(""); $d.Add("== $r")
+        $pl = Join-Path $dir "$r-player.log"
+        if (Test-Path $pl) {
+            $lines = Get-Content $pl
+            $ex = 0; $where = @{}
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match 'Exception') {
+                    $ex++
+                    if ($i + 1 -lt $lines.Count -and $lines[$i + 1] -match '^\s+at (\S+)') { $k = ($lines[$i] -replace ':.*$', '') + " at " + $Matches[1]; $where[$k] = 1 + [int]$where[$k] }
+                }
+            }
+            $d.Add("errors in player.log: $ex")
+            foreach ($kv in ($where.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 4)) { $d.Add("  $($kv.Value)x $($kv.Key)") }
+        }
+        $cl = Join-Path $dir "$r-coop.log"
+        if (Test-Path $cl) {
+            $fails = @(Select-String -Path $cl -Pattern 'failed' -SimpleMatch | Where-Object { $_.Line -notmatch '^\S+ \[test\] (PASS|FAIL)' })
+            $d.Add("'failed' lines in coop.log: $($fails.Count)")
+            foreach ($f in ($fails | Select-Object -First 3)) { $d.Add("  " + (Cut $f.Line 220)) }
+        }
+        $dl = Join-Path $dir "$r-coop_diag.log"
+        if (Test-Path $dl) {
+            $stats = @(Select-String -Path $dl -Pattern ' stats 10s: ' -SimpleMatch)
+            foreach ($st in ($stats | Select-Object -Last 2)) { $d.Add("  " + (Cut ($st.Line -replace '^.*stats 10s: ', 'stats: ') 700)) }
+            if ($r -eq "client") {
+                $rb = @(Select-String -Path $dl -Pattern ' rebuilt (\S+?)#' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+                $d.Add("rebuilds (could not update in place): $($rb.Count)")
+                foreach ($g in ($rb | Group-Object | Sort-Object Count -Descending | Select-Object -First 8)) { $d.Add("  $($g.Count)x $($g.Name)") }
+            }
+        }
+    }
+    # objects the world check found different: where the two sides' JSON first differs
+    $cc = Join-Path $dir "client-coop.log"; $hc = Join-Path $dir "host-coop.log"
+    if ((Test-Path $cc) -and (Test-Path $hc)) {
+        $mine = @{}; $theirs = @{}
+        foreach ($m in (Select-String -Path $cc -Pattern '\[test\] stable here (\d+): (.*)$')) { $mine[$m.Matches[0].Groups[1].Value] = $m.Matches[0].Groups[2].Value }
+        foreach ($m in (Select-String -Path $hc -Pattern '\[test\] stable host (\d+): (.*)$')) { $theirs[$m.Matches[0].Groups[1].Value] = $m.Matches[0].Groups[2].Value }
+        if ($mine.Count -gt 0) { $d.Add(""); $d.Add("== world check differences (joiner J vs host H, around the first difference)") }
+        foreach ($u in $mine.Keys) {
+            $a = $mine[$u]; $b = if ($theirs.ContainsKey($u)) { $theirs[$u] } else { "" }
+            $i = 0; $n = [Math]::Min($a.Length, $b.Length)
+            while ($i -lt $n -and $a[$i] -eq $b[$i]) { $i++ }
+            $s0 = [Math]::Max(0, $i - 120)
+            $type = if ($a -match '^\{"ID":"([^"]+)"') { $Matches[1] } else { "?" }
+            $d.Add("$type $u (joiner $($a.Length) chars, host $($b.Length))")
+            $d.Add("  J: " + $a.Substring($s0, [Math]::Min(240, $a.Length - $s0)))
+            if ($b.Length -gt $s0) { $d.Add("  H: " + $b.Substring($s0, [Math]::Min(240, $b.Length - $s0))) } else { $d.Add("  H: (not logged)") }
+        }
+    }
+    $d | Set-Content -Path (Join-Path $dir "digest.txt") -Encoding UTF8
+}
+
 # ---------------- run ----------------
 function Start-Role([string]$r) {
     $env:COOP_TEST = $r
@@ -190,6 +248,14 @@ try {
         $status = "  $mins min: $pass passed, $fail failed"
         if ($status -ne $lastShown) { Write-Host "`r$status   " -NoNewline; $lastShown = $status }
         $tick++; if ($tick % 6 -eq 0) { Collect }   # partial results survive closing this window
+        # stop early: asked to (kit\requests\cancel), or the mod failed to load (its patches didn't apply)
+        $cancel = Join-Path $Kit "requests\cancel"
+        if (Test-Path $cancel) { Remove-Item $cancel -Force -ErrorAction SilentlyContinue; Say ""; Say "Cancelled." Yellow; break }
+        if ($tick % 6 -eq 3) {
+            $broken = $false
+            foreach ($r in @("host", "client")) { $pl = Join-Path $Work "$r\player.log"; if ((Test-Path $pl) -and (Select-String -Path $pl -Pattern "HarmonyException" -SimpleMatch -Quiet)) { $broken = $true } }
+            if ($broken) { Say ""; Say "The mod failed to load (HarmonyException in player.log): stopping." Red; break }
+        }
         if ((Test-Path $resClient) -and (Select-String -Path $resClient -Pattern "^DONE" -Quiet)) { Start-Sleep -Seconds 5; break }
         if ($ph.HasExited -and $pc.HasExited) { Say ""; Say "Both games closed." Yellow; break }
     }
@@ -218,7 +284,23 @@ $summary = @(
     ""
 ) + ($all | Where-Object { $_ -like "FAIL*" -or $_ -like "PASS info:*" })
 $summary | Set-Content -Path (Join-Path $out "summary.txt") -Encoding UTF8
+try { Write-Digest $out $summary } catch { Set-Content -Path (Join-Path $out "digest.txt") -Value "digest failed: $($_.Exception.Message)" -Encoding UTF8 }
 Set-Content -Path (Join-Path $Kit "results\latest.txt") -Value $out -Encoding UTF8
+
+# Started by an older watcher (it doesn't set COOP_WATCHER)? Swap it for the current one: start Watch.bat and stop
+# the old watcher process (this run's results are already saved; the new watcher marks the request interrupted).
+if (-not $env:COOP_WATCHER) {
+    try {
+        $me = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($me.ParentProcessId)"
+        if ($parent -and $parent.CommandLine -match 'watch\.ps1') {
+            Start-Process -FilePath (Join-Path $Kit "Watch.bat") -WorkingDirectory $Kit -WindowStyle Minimized
+            $gp = Get-CimInstance Win32_Process -Filter "ProcessId=$($parent.ParentProcessId)"
+            if ($gp -and $gp.CommandLine -match 'Watch\.bat') { Stop-Process -Id $gp.ProcessId -Force }   # its window (else it waits at "pause")
+            Stop-Process -Id $parent.ProcessId -Force
+        }
+    } catch {}
+}
 
 Say ""
 if ($fail -eq 0 -and $done) { Say "RESULT: all $pass passed." Green } else { Say "RESULT: $pass passed, $fail failed$(if (-not $done) { ', did not finish' })." Red }

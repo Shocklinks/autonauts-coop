@@ -53,14 +53,50 @@ namespace AutonautsCoop
         static readonly System.Text.RegularExpressions.Regex UsedZero = new System.Text.RegularExpressions.Regex(",\"Used\":0(?=[,}])");
         public static string Stable(BaseClass b, string json)
         {
-            int n = 0;
-            json = ChildPos.Replace(json, m => n++ == 0 ? m.Value : m.Groups[1].Value);   // keep the object's own tile
-            json = UsedZero.Replace(json, "");
-            json = VolatileAll.Replace(json, "");
+            // (each pass only when its text is there: this runs for every object looked at, and the passes made garbage)
+            int second = json.IndexOf("{\"ID\":", 1, StringComparison.Ordinal);
+            if (second > 0)
+            {
+                int n = 0;
+                json = ChildPos.Replace(json, m => n++ == 0 ? m.Value : m.Groups[1].Value);   // keep the object's own tile
+            }
+            if (json.IndexOf("\"Used\":0", StringComparison.Ordinal) >= 0) json = UsedZero.Replace(json, "");
+            if (json.IndexOf(",\"STT\":", StringComparison.Ordinal) >= 0) json = VolatileAll.Replace(json, "");
             if (b is Animal) json = VolatileAnimal.Replace(json, "");
             else if (b is Floor2D || IsPath(b.m_TypeIdentifier)) json = Rotation.Replace(json, "");   // paths/flooring pick their look from neighbours on each machine
             return json;
         }
+        // the host's JSON for one update is normalized once, not at every comparison
+        static string memoIn, memoOut; static BaseClass memoB;
+        static string StableW(BaseClass b, string json)
+        {
+            if (ReferenceEquals(json, memoIn) && memoB == b) return memoOut;
+            memoIn = json; memoB = b; memoOut = Stable(b, json); return memoOut;
+        }
+        /// Joiner: what each object was last made to match (uid -> object, normalized hash). An update with the same
+        /// hash is skipped without saving our copy to compare. Dropped when the digest says our copy is off.
+        static readonly Dictionary<int, KeyValuePair<BaseClass, int>> applied = new Dictionary<int, KeyValuePair<BaseClass, int>>();
+        // Checking every in-place update (save our copy, normalize, compare) was a big part of the joiner's garbage.
+        // A kind of update that has matched 20 times in a row is checked one time in 10; the digest re-saves what was
+        // touched every 10 s anyway, and anything it flags (mustVerify) is always checked when it comes back.
+        static readonly Dictionary<string, int> verifiedRun = new Dictionary<string, int>();
+        static readonly HashSet<int> mustVerify = new HashSet<int>();
+        public static int StatVerifySkipped;
+        static bool TrustInPlace(string kind, int uid)
+        {
+            if (mustVerify.Contains(uid)) return false;
+            verifiedRun.TryGetValue(kind, out int run);
+            if (run < 20) return false;
+            verifiedRun[kind] = run + 1;
+            return run % 10 != 0;
+        }
+        static void Verified(string kind, int uid, bool ok)
+        {
+            mustVerify.Remove(uid);
+            if (!ok) { verifiedRun[kind] = 0; return; }
+            verifiedRun.TryGetValue(kind, out int run); if (run < 20) verifiedRun[kind] = run + 1;
+        }
+        static void Applied(BaseClass b, int uid, string wantStable) { applied[uid] = new KeyValuePair<BaseClass, int>(b, wantStable.GetHashCode()); }
         public static int StableHash(BaseClass b) => Stable(b, SaveObject(b, out _)).GetHashCode();
 
         public struct Entry { public BaseClass B; public string Json; public int Hash; }
@@ -341,6 +377,9 @@ namespace AutonautsCoop
                     if (!b) { Plugin.Log("[test] stable host " + x.AsInt + ": (none)"); continue; }
                     string js = SaveObject(b, out _);
                     Plugin.Log("[test] stable host " + x.AsInt + ": " + Stable(b, js));
+                    Scan.Cache.TryGetValue(x.AsInt, out var sc);
+                    Plugin.Log("[test] host record " + x.AsInt + ": fresh " + Stable(b, js).GetHashCode() + ", scan " + (sc != null ? sc.Hash.ToString() + " (looked " + (Time.realtimeSinceStartup - sc.LastFull).ToString("F0") + " s ago)" : "none")
+                        + ", sent " + (sentHash.TryGetValue(x.AsInt, out int sh) ? sh.ToString() : "none") + ", inside another: " + Scan.IsNested(x.AsInt));
                 }
                 return;
             }
@@ -478,6 +517,7 @@ namespace AutonautsCoop
 
         public static void OnClientLoaded()
         {
+            recheckAt = Time.realtimeSinceStartup + 5f;
             TimeManager.Instance.EnableNormalTime(false);
             foreach (var kv in Savables()) if (kv.Key && kv.Key.m_UniqueID > 0) HostKnown.Add(kv.Key.m_UniqueID);
             // Objects the joiner creates locally (edit-mode cursor/previews, effects) get UIDs from a range the
@@ -637,7 +677,7 @@ namespace AutonautsCoop
                 if (b.m_UniqueID == Teach.EditingUid()) { theirs.Remove(b.m_UniqueID); continue; }
                 if (!theirs.TryGetValue(b.m_UniqueID, out int h)) { extra.Add(b); continue; }
                 // just changed: the digest may predate it (and rebuilding now would pull it out from under open screens)
-                if (kv.Value.Hash != h && !(recentApply.TryGetValue(b.m_UniqueID, out float at) && Time.realtimeSinceStartup - at < 3f)) need.Add(b.m_UniqueID);
+                if (kv.Value.Hash != h && !(recentApply.TryGetValue(b.m_UniqueID, out float at) && Time.realtimeSinceStartup - at < 3f)) { need.Add(b.m_UniqueID); applied.Remove(b.m_UniqueID); mustVerify.Add(b.m_UniqueID); }
                 theirs.Remove(b.m_UniqueID);
             }
             foreach (var uid in theirs.Keys) need.Add(uid);   // host has, we don't
@@ -691,12 +731,21 @@ namespace AutonautsCoop
         /// A farmer's save names what it is engaged with ("Engaged"), but Load only notes the id; the link is made when
         /// a whole world loads. Reloading a joiner's character in place while it used a workbench dropped the link, the
         /// check failed, and the character was rebuilt (closing the joiner's building screen mid-use).
+        /// What a farmer holds (hands, pockets, upgrades, clothes): its held objects sit under it. Found directly
+        /// instead of saving the whole bot (program and all) just to read the UIDs out of the text.
+        static List<int> HeldUids(BaseClass b)
+        {
+            var l = new List<int>();
+            foreach (var h in b.GetComponentsInChildren<Holdable>(true)) if (h && h != b && h.m_UniqueID > 0) l.Add(h.m_UniqueID);
+            return l;
+        }
         static void KeepEngaged(BaseClass b, JSONNode o, BaseClass before)
         {
             var f = b as Farmer;
-            if (!f || f.m_EngagedObject) return;
+            if (!f) return;
             int want = o["Engaged"] != null && !o["Engaged"].IsNull ? o["Engaged"].AsInt : -1;
-            if (want <= 0) return;
+            if (want <= 0) { if (f.m_EngagedObject) f.m_EngagedObject = null; return; }   // done with it on the host (Load doesn't clear it)
+            if (f.m_EngagedObject) return;
             var e = before && before.m_UniqueID == want ? before : ObjectTypeList.Instance.GetObjectFromUniqueID(want, false);
             var a = e ? e.GetComponent<Actionable>() : null;
             if (a) { f.m_EngagedObject = a; StatKeptEngaged++; }
@@ -707,14 +756,18 @@ namespace AutonautsCoop
             // Already exactly what the host has (e.g. everything the host re-sends right after a join): nothing to do.
             // Rebuilding those (blueprints with their building-to-be, bots carrying things) cost ~700 rebuilds and a
             // second-long stall on a big base, and briefly took the joiner's own character away.
+            if (b && applied.TryGetValue(uid, out var ap) && ap.Key == b && ap.Value == StableW(b, want).GetHashCode()
+                && !(b.transform.parent && b.transform.parent.GetComponentInParent<BaseClass>())) { StatSame++; StatSameCached++; return; }
             if (b && (bool)b.GetComponent<Savable>() && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false)
                 && !(b.transform.parent && b.transform.parent.GetComponentInParent<BaseClass>())
-                && Stable(b, SaveObject(b, out _)) == Stable(b, want)) { StatSame++; return; }
+                && Stable(b, SaveObject(b, out _)) == StableW(b, want)) { StatSame++; Applied(b, uid, StableW(b, want)); return; }
             var nested = new List<int>();
             CollectUIDs(want, uid, nested);
             // a blueprint's building-to-be is created by its Load and only named by "NewID"
             if (o["NewID"] != null && !o["NewID"].IsNull && o["NewID"].AsInt > 0) nested.Add(o["NewID"].AsInt);
             if (nested.Count > 0 && b is Housing hs && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && HousingInPlace(hs, o, want, uid)) return;
+            if (nested.Count > 0 && b is Building bi && !(b is Housing) && !(b is ConverterFoundation) && !bi.m_ParentBuilding
+                && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && BuildingInPlace(bi, o, want, uid, nested)) return;
             if (nested.Count > 0)
             {
                 // Children (carried items, nests, contents) are rebuilt by the parent's Load; clear them first.
@@ -725,7 +778,11 @@ namespace AutonautsCoop
                 {
                     try
                     {
+                        // what our copy holds that the host's no longer does (used up, put down): remove it too
+                        var hadN = HeldUids(b);
+                        foreach (var c in hadN) { if (nested.Contains(c)) continue; var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (!cb || cb == b) continue; var hold = cb.transform.parent ? cb.transform.parent.GetComponentInParent<Farmer>() : null; if (hold && hold != b) continue; Destroy(cb); }
                         ClearHeld(b.GetComponent<Farmer>());
+                        foreach (var c in nested) FreeUid(c);   // what it now holds keeps the host's UID (stale entries made Load pick new ones)
                         ResetRuntime(b);
                         if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
                         var engKeep = (b as Farmer) ? ((Farmer)b).m_EngagedObject : null;
@@ -733,8 +790,11 @@ namespace AutonautsCoop
                         KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
                         ApplyStored(b, o);
+                        string kindN = "nested " + (string)o["ID"];
+                        if (b.m_UniqueID == uid && TrustInPlace(kindN, uid)) { StatInPlace++; StatNestedInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); return; }
                         string got = Stable(b, SaveObject(b, out _));
-                        if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; StatNestedInPlace++; return; }
+                        bool okN = b.m_UniqueID == uid && got == StableW(b, want); Verified(kindN, uid, okN);
+                        if (okN) { StatInPlace++; Applied(b, uid, StableW(b, want)); StatNestedInPlace++; return; }
                         LogDiff("nested " + (string)o["ID"], want, got);
                     }
                     catch (Exception e) { Plugin.Log("in-place nested load failed for " + o["ID"] + ": " + e.Message); }
@@ -769,10 +829,16 @@ namespace AutonautsCoop
                         if (b is Farmer)
                         {
                             // it put something down on the host: drop what our copy still holds before reloading
-                            var had = new List<int>(); CollectUIDs(SaveObject(b, out _), uid, had);
+                            var had = HeldUids(b);
                             // only what our copy still really holds: the same UID may already be in someone else's hands (applied first)
                             foreach (var c in had) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (!cb || cb == b) continue; var hold = cb.transform.parent ? cb.transform.parent.GetComponentInParent<Farmer>() : null; if (hold && hold != b) continue; Destroy(cb); }
                             ClearHeld(b.GetComponent<Farmer>());
+                        }
+                        else if (b is Converter cvx && cvx.m_Ingredients != null && cvx.m_Ingredients.Count > 0)
+                        {
+                            // emptied on the host (used up): Load only adds what the host lists
+                            foreach (var h in cvx.m_Ingredients) if (h) Destroy(h);
+                            cvx.m_Ingredients.Clear();
                         }
                         ResetRuntime(b);
                         // Savable.Load re-registers the UID (ChangeActionable); unregister first or it allocates a new one.
@@ -781,9 +847,14 @@ namespace AutonautsCoop
                         b.GetComponent<Savable>().Load(o);
                         KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
+                        // plants (and storage) apply part of what they load only on Refresh, as after the game's own load
+                        if (!(b is Farmer)) b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
                         ApplyStored(b, o);
+                        string kindM = "in-place " + (string)o["ID"];
+                        if (b.m_UniqueID == uid && TrustInPlace(kindM, uid)) { StatInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); return; }
                         string got = Stable(b, SaveObject(b, out _));
-                        if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; return; }
+                        bool okM = b.m_UniqueID == uid && got == StableW(b, want); Verified(kindM, uid, okM);
+                        if (okM) { StatInPlace++; Applied(b, uid, StableW(b, want)); return; }
                         LogDiff((string)o["ID"], want, got);
                     }
                     catch (Exception e) { Plugin.Log("in-place load failed for " + o["ID"] + ": " + e.Message); }
@@ -801,6 +872,63 @@ namespace AutonautsCoop
         /// Settlement huts save their folk inside them, and folk change all the time (energy, timers), so every hut
         /// changed every scan and was rebuilt with its folk. Update the hut and each of its folk in place instead,
         /// as long as the same folk live there.
+        public static int StatBuildingInPlace, StatSameCached;
+        /// Buildings with contents (storage stacks, machines holding ingredients) were destroyed and rebuilt on every
+        /// change: a stack's count went up by one, a bench got an ingredient. ~380 rebuilds in 3 minutes on a big base,
+        /// each a pile of new objects (and the old ones' garbage). Reload the same building instead: its levels in
+        /// place, its ingredients replaced. Anything else nested (unknown contents) still takes the rebuild.
+        static bool BuildingInPlace(Building bld, JSONNode o, string want, int uid, List<int> nested)
+        {
+            try
+            {
+                var lv = o["Levels"]; var lvArr = lv != null && !lv.IsNull ? lv.AsArray : null;
+                var ing = o["IngredientsItems"]; var ingArr = ing != null && !ing.IsNull ? ing.AsArray : null;
+                var known = new HashSet<int>();
+                void Add(JSONNode e) { int u = e["UID"].AsInt; if (u > 0) known.Add(u); var l = new List<int>(); CollectUIDs(e.ToString(), u, l); foreach (var x in l) known.Add(x); }
+                if (lvArr != null) foreach (JSONNode e in lvArr) Add(e);
+                if (ingArr != null) foreach (JSONNode e in ingArr) Add(e);
+                foreach (var n in nested) if (!known.Contains(n)) return false;   // something else inside
+                // the levels must be the same buildings, in the same order
+                int nl = lvArr != null ? lvArr.Count : 0;
+                int have = bld.m_Levels != null ? bld.m_Levels.Count : 0;
+                if (nl != have) return false;
+                for (int i = 0; i < nl; i++)
+                {
+                    var l = bld.m_Levels[i];
+                    if (!l || l.m_UniqueID != lvArr[i]["UID"].AsInt) return false;
+                    var lnest = new List<int>(); CollectUIDs(lvArr[i].ToString(), l.m_UniqueID, lnest);
+                    if (lnest.Count > 0) return false;
+                }
+                var cv = bld as Converter;
+                if (ingArr != null && ingArr.Count > 0 && !cv) return false;
+                if (cv && cv.m_Ingredients != null)
+                {
+                    foreach (var h in cv.m_Ingredients) if (h) Destroy(h);
+                    cv.m_Ingredients.Clear();
+                }
+                if (ingArr != null) foreach (JSONNode e in ingArr) { int u = e["UID"].AsInt; if (u > 0) FreeUid(u); }
+                if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == bld) ObjectTypeList.Instance.RemoveActionable(bld);
+                bld.GetComponent<Savable>().Load(o);
+                bld.GetComponent<Savable>().PostLoad();
+                for (int i = 0; i < nl; i++)
+                {
+                    var l = bld.m_Levels[i];
+                    if (ObjectTypeList.Instance.GetObjectFromUniqueID(l.m_UniqueID, false) == l) ObjectTypeList.Instance.RemoveActionable(l);
+                    l.GetComponent<Savable>().Load(lvArr[i]);
+                    l.GetComponent<Savable>().PostLoad();
+                }
+                ApplyStored(bld, o);
+                string kindB = "building " + (string)o["ID"];
+                if (bld.m_UniqueID == uid && TrustInPlace(kindB, uid)) { StatInPlace++; StatBuildingInPlace++; StatVerifySkipped++; Applied(bld, uid, StableW(bld, want)); return true; }
+                string got = Stable(bld, SaveObject(bld, out _));
+                bool okB = bld.m_UniqueID == uid && got == StableW(bld, want); Verified(kindB, uid, okB);
+                if (okB) { StatInPlace++; Applied(bld, uid, StableW(bld, want)); StatBuildingInPlace++; return true; }
+                LogDiff("building " + (string)o["ID"], want, got);
+            }
+            catch (Exception e) { Plugin.Log("in-place building load failed for " + o["ID"] + ": " + e.Message); }
+            return false;
+        }
+
         static bool HousingInPlace(Housing h, JSONNode o, string want, int uid)
         {
             try
@@ -823,7 +951,7 @@ namespace AutonautsCoop
                     f.GetComponent<Savable>().Load(arr[i]);
                 }
                 string got = Stable(h, SaveObject(h, out _));
-                if (h.m_UniqueID == uid && got == Stable(h, want)) { StatInPlace++; StatHousingInPlace++; return true; }
+                if (h.m_UniqueID == uid && got == StableW(h, want)) { StatInPlace++; Applied(h, uid, StableW(h, want)); StatHousingInPlace++; return true; }
                 LogDiff("housing " + (string)o["ID"], want, got);
             }
             catch (Exception e) { Plugin.Log("in-place housing load failed for " + o["ID"] + ": " + e.Message); }
@@ -867,15 +995,19 @@ namespace AutonautsCoop
         /// A storage's count is loaded into a temporary and only made real by a Refresh, which the game skips for a
         /// storage that sits in another building (and Refresh isn't sent at all for an in-place update). Those kept the
         /// old count on the joiner, failed the in-place check and were rebuilt over and over. Take the host's count.
+        static readonly HarmonyLib.AccessTools.FieldRef<Storage, int> tempStored = HarmonyLib.AccessTools.FieldRefAccess<Storage, int>("m_TempStored");
         static void ApplyStored(BaseClass b, JSONNode o)
         {
             void One(Storage st, JSONNode n)
             {
                 if (!st || n == null || n["Stored"] == null || n["Stored"].IsNull) return;
                 int want = n["Stored"].AsInt;
+                // the loaded count waits in m_TempStored for a Refresh; left there, a later Refresh put the old
+                // count back (a storage drifting below the host's by one or two). Always clear it.
+                tempStored(st) = 0;
                 if (st.m_Stored == want) return;
+                Diag.Log("stored " + st.m_UniqueID + ": " + st.m_Stored + " -> " + want);
                 st.m_Stored = want;
-                HarmonyLib.Traverse.Create(st).Field("m_TempStored").SetValue(0);
                 st.UpdateStored();
             }
             try
@@ -1043,9 +1175,13 @@ namespace AutonautsCoop
         static int frozenSkipped = -1, lastEditing = -1;
         static float nextSweep;
         public static int StatSwept;
+        // Some of the world settles a moment after the join load (storage stacks re-counting their levels); our record
+        // of it was taken before, so the digest saw no difference and nothing was repaired. Look at everything again.
+        static float recheckAt;
         public static void ClientFrame()
         {
             if (!Coop.I.ClientLoaded) return;
+            if (recheckAt > 0 && Time.realtimeSinceStartup > recheckAt) { recheckAt = 0; Scan.Full(); Plugin.Log("joiner: re-checked the world after loading"); }
             int editing = Teach.EditingUid();
             if (editing != lastEditing)
             {
@@ -1279,5 +1415,66 @@ namespace AutonautsCoop
             SaveLoadManager.Instance.m_Loading = true;
         }
         static void Finalizer(int __state) { if (__state != 0 && SaveLoadManager.Instance != null) SaveLoadManager.Instance.m_Loading = __state == 2; }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: something on the joiner took items out of a storage on its own (a count drifting down by one or two
+    // after the host's update). Storage counts are the host's; ignore local takes and log who tried (first few).
+    [HarmonyLib.HarmonyPatch(typeof(Storage), nameof(Storage.ReleaseStored))]
+    static class P_ClientNoLocalTake
+    {
+        static int logged;
+        static bool Prefix(Storage __instance, ref int __result)
+        {
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded) return true;
+            // while applying host data too: the host's JSON already has the count (a bot's reload must not take again)
+            if (logged++ < 5) Diag.Log("blocked a local take from storage " + (Sync.Applying ? "(while applying) " : "") + __instance.m_UniqueID + ": " + Environment.StackTrace.Replace("\n", " | ").Substring(0, Math.Min(900, Environment.StackTrace.Length)));
+            __result = 0;
+            return false;
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: the game's own "add to storage" (capacity-checked) clamped a count the host has over capacity (a stack
+    // merged past its limit: 100 in a 99 stack) back down. Counts are the host's; ignore local adds and log who
+    // tried (first few). Structural merges (stacking levels, CheckCapacity: false) still run.
+    [HarmonyLib.HarmonyPatch(typeof(Storage), nameof(Storage.AddToStored), new[] { typeof(ObjectType), typeof(int), typeof(Actionable), typeof(bool) })]
+    static class P_ClientNoLocalAdd
+    {
+        static int logged;
+        static bool Prefix(Storage __instance, bool CheckCapacity)
+        {
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded || !CheckCapacity) return true;
+            if (logged++ < 5) Diag.Log("blocked a local add to storage " + __instance.m_UniqueID + (Sync.Applying ? " (while applying)" : "") + ": " + Environment.StackTrace.Replace("\n", " | ").Substring(0, Math.Min(900, Environment.StackTrace.Length)));
+            return false;
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: Steam Workshop (Lua) mods run on every machine. One on a big base balanced two storages every few
+    // seconds through ModStorage, so the joiner's counts fought the host's (the host runs the same mod; its results
+    // arrive with the host's data). Storage writes from mods do nothing on the joiner.
+    [HarmonyLib.HarmonyPatch]
+    static class P_ClientNoModStorageWrites
+    {
+        static readonly string[] names = { "SetStorageMaxCapacity", "SetStorageQuantityStored", "SetStorageType", "AddToStorage", "AssignStorageItemType", "TransferBetweenStorages" };
+        static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            foreach (var m in typeof(ModStorage).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly))
+                if (Array.IndexOf(names, m.Name) >= 0 && (m.ReturnType == typeof(bool) || m.ReturnType == typeof(int))) yield return m;
+        }
+        static int logged;
+        static bool Prefix(System.Reflection.MethodBase __originalMethod)
+        {
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded) return true;
+            if (logged++ < 3) Diag.Log("ignored a mod's storage change on the joiner: " + __originalMethod.Name);
+            return false;   // (result stays default: false / 0)
+        }
     }
 }

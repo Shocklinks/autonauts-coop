@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - watch.ps1 (started by Watch.bat)
-# Version 0.12.5 - 2026-10-22 - Created with Claude
+# Version 0.12.15 - 2026-10-23 - Created with Claude
 #
 # Waits for test requests and runs the kit for each one, so tests can be started without anyone at the PC.
 #   - A request is a small text file in kit\requests\ named <anything>.req, for example:
@@ -11,9 +11,16 @@
 #   - While a request runs it is renamed .running; when done, <name>.done says where the results are and the
 #     kit's console output is in <name>.log.
 #   - kit\watcher-status.txt shows that the watcher is alive (updated every few seconds).
+#   - A request with only "action=shutdown" shuts this PC down (60 s warning; "shutdown /a" in a command prompt
+#     cancels). It waits its turn: requests before it run first.
+#   - A file named "cancel" in kit\requests stops the test that is running (kit.ps1 checks for it).
+#   - When watch.ps1 itself is updated, the watcher restarts itself with the new version (between requests).
 # Close this window to stop watching.
 $ErrorActionPreference = "Stop"
 $Kit = $PSScriptRoot
+$env:COOP_WATCHER = "2"   # tells kit.ps1 this watcher is current
+$Self = $MyInvocation.MyCommand.Path
+$SelfTime = (Get-Item $Self).LastWriteTimeUtc
 $Req = Join-Path $Kit "requests"
 $Status = Join-Path $Kit "watcher-status.txt"
 $SavesRoot = Join-Path $env:USERPROFILE "AppData\LocalLow\Denki Ltd\Autonauts\Saves"
@@ -24,12 +31,13 @@ function Set-Status([string]$s) {
 }
 
 function Read-Request([string]$path) {
-    $r = @{ mode = ""; save = ""; lag = 0; jitter = 0; minutes = 45; watch = 180 }
+    $r = @{ mode = ""; save = ""; lag = 0; jitter = 0; minutes = 45; watch = 180; action = "" }
     foreach ($line in Get-Content $path) {
         if ($line -notmatch '^\s*([a-z]+)\s*=\s*(.*?)\s*$') { continue }
         $k = $Matches[1]; $v = $Matches[2]
         switch ($k) {
             "mode"    { if ($v -in @("full", "save")) { $r.mode = $v } }
+            "action"  { if ($v -eq "shutdown") { $r.action = $v } }
             "save"    { $r.save = $v }
             "lag"     { $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 2000) { $r.lag = $n } }
             "jitter"  { $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 2000) { $r.jitter = $n } }
@@ -43,7 +51,20 @@ function Read-Request([string]$path) {
 Write-Host "AutonautsCoop test watcher. Waiting for requests in $Req" -ForegroundColor White
 Write-Host "Close this window to stop." -ForegroundColor White
 Set-Status "idle"
+# a request left half-done by a restart: say so instead of leaving it "running" forever
+foreach ($old in @(Get-ChildItem -Path $Req -Filter "*.running" -ErrorAction SilentlyContinue)) {
+    $latest = Join-Path $Kit "results\latest.txt"
+    $res = if (Test-Path $latest) { (Get-Content $latest -Raw).Trim() } else { "?" }
+    Set-Content -Path (Join-Path $Req "$($old.BaseName).done") -Value @("interrupted (watcher restarted); newest results: $res") -Encoding UTF8
+    Remove-Item $old.FullName -Force -ErrorAction SilentlyContinue
+}
 while ($true) {
+    # updated? start the new version and stop this one
+    if ((Get-Item $Self).LastWriteTimeUtc -ne $SelfTime) {
+        Write-Host ("{0}  watch.ps1 changed: restarting" -f (Get-Date -Format "HH:mm")) -ForegroundColor White
+        Start-Process -FilePath (Join-Path $Kit "Watch.bat") -WorkingDirectory $Kit -WindowStyle Minimized
+        exit 0
+    }
     $next = Get-ChildItem -Path $Req -Filter "*.req" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -First 1
     if (-not $next) { Set-Status "idle"; Start-Sleep -Seconds 5; continue }
 
@@ -53,6 +74,15 @@ while ($true) {
     $log = Join-Path $Req "$name.log"
     Move-Item -Path $next.FullName -Destination $running -Force
     $r = Read-Request $running
+    if ($r.action -eq "shutdown") {
+        Set-Content -Path $done -Value "shutting down $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (60 s; cancel with: shutdown /a)" -Encoding UTF8
+        Remove-Item $running -Force -ErrorAction SilentlyContinue
+        Write-Host ("{0}  {1}: shutting this PC down in 60 s (cancel: shutdown /a)" -f (Get-Date -Format "HH:mm"), $name) -ForegroundColor Yellow
+        Set-Status "shutting down"
+        & shutdown.exe /s /t 60 /c "AutonautsCoop test watcher: tests done, shutting down. Cancel: shutdown /a"
+        Start-Sleep -Seconds 90
+        continue
+    }
     $problem = $null
     if (-not $r.mode) { $problem = "mode must be full or save" }
     elseif ($r.mode -eq "save") {
@@ -85,7 +115,9 @@ while ($true) {
     $result = if ($after -and $after -ne $before) { $after } else { "(no results folder)" }
     $summary = Join-Path $result "summary.txt"
     $lines = @("request: $desc", "exit: $code", "results: $result")
-    if (Test-Path $summary) { $lines += (Get-Content $summary | Select-Object -First 8) }
+    $digest = Join-Path $result "digest.txt"
+    if (Test-Path $digest) { $lines += (Get-Content $digest | Select-Object -First 80) }
+    elseif (Test-Path $summary) { $lines += (Get-Content $summary | Select-Object -First 8) }
     Set-Content -Path $done -Value $lines -Encoding UTF8
     Remove-Item $running -Force -ErrorAction SilentlyContinue
     Write-Host ("{0}  {1}: done ({2})" -f (Get-Date -Format "HH:mm"), $name, (($lines | Where-Object { $_ -like "RESULT*" }) -join "")) -ForegroundColor Green

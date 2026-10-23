@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.5**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.24**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -68,6 +68,34 @@ Status: **alpha 0.12.5**. Not affiliated with Denki or Curve Games. Contains no 
 - Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
+
+## 0.12.6-0.12.24: smoother joiner, sync fixes (found with the test kit on a big save)
+
+- **Joiner error storm fixed.** A building blueprint being removed mid-build stayed half-removed and threw ~150
+  errors a second (35,000 per test), each a log line with a stack trace.
+- **Buildings with contents update in place** (storage stacks, workbenches, pots) instead of being destroyed and
+  rebuilt on every change. So do emptied machines, bots that put things down, and growing plants. Joiner rebuilds on
+  a 10,800-object base: ~380 per 3 minutes before, ~50 now.
+- **Bot programs no longer change on the joiner.** Rebuilt buildings and storage stacks made the game rewrite and
+  recompile every bot's program (53 bots, for each rebuild).
+- **Steam Workshop (Lua) mods no longer change storage on the joiner.** They run on both machines; one on the test
+  base balanced two storages every few seconds, fighting the host's counts (the host's results still arrive).
+- **Storage counts follow the host**, including stacks that sit in another building and stacks over their normal
+  capacity. The joiner re-checks the whole world once, 5 s after joining, so anything that settled after the load
+  is repaired.
+- **Host:** anything acted on (added to, taken from, picked up) is checked at the next scan; the slow background
+  round is now 40 s. Bots are fully re-saved every 8 s (every scan while someone has one open), otherwise only when
+  a cheap look sees a change. Unchanged objects skip the normalizing pass.
+- **Joiner:** updates that match what it already has are skipped without saving its copy to compare. A kind of
+  update that has applied cleanly 20 times in a row is double-checked one time in 10 (the 10 s digest still
+  re-checks everything that changed, and what it flags is always checked). Held items are found directly instead of
+  saving the whole bot.
+- Build: `build.sh` checks that every patch finds its game method (an overloaded method made 0.12.19 not load).
+- Note: each garbage-collection pause is ~200 ms on a ~1 GB save, set by Unity 2018's collector. The game alone
+  pauses about every 40 s on that save; with a joiner both sides now pause about every 20-25 s (was 13-21 s).
+- Test kit: `digest.txt` in each results folder (result, errors, stats, rebuilds, world-check differences); the
+  watcher can shut the PC down when asked and restarts itself when updated. Diagnostics: garbage per part of the
+  mod and per game update (soak runs).
 
 ## 0.12.5: host stutter
 

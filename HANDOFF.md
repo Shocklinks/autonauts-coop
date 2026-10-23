@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.12.2 - 2026-10-22 - Created with Claude
+Version 0.12.20 - 2026-10-23 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -126,6 +126,15 @@ Sandbox limits:
   file `kit\requests\<name>.req` (lines `mode=full|save`, `save=<save name>`, `lag=`, `jitter=`) with the
   device commit tool; read `kit\requests\<name>.done`, then the results folder it names. `kit\watcher-status.txt`
   shows the watcher is alive. Put the new release zip in `kit\` first (the kit uses the newest one).
+- Read `kit\requests\<name>.done` first: it carries the run's `digest.txt` (result, errors, last stats lines,
+  joiner rebuilds by type, world-check differences with both sides' JSON at the first difference). Open the full
+  logs only when the digest isn't enough.
+- `build.sh` also runs `tools/PatchCheck.cs` (mono): every Harmony patch must resolve to exactly one game method.
+  One missing or ambiguous target stops PatchAll and the mod silently does nothing in the game (happened in 0.12.19:
+  an overloaded method). A file `kit\requests\cancel` stops a running test; the kit also stops by itself when
+  player.log shows a HarmonyException.
+- `action=shutdown` in a request shuts the PC down after the requests before it (only when the owner asks).
+  The watcher restarts itself when watch.ps1 changes; kit.ps1 is re-read every run.
 
 - The owner's linked computer has only a Linux VM shell: it can't run the Windows game. The kit does instead.
 - Put the release zip in `kit\` (gitignored) and have the owner double-click `kit\RunTests.bat`.
@@ -140,6 +149,13 @@ Sandbox limits:
   action with the host's outcome, "rebuilt"/"didn't match" lines show sync churn, "stats 10s" lines show fps/RTT.
 
 ## Open work (priority order)
+
+0. Garbage (GC pauses, ~200 ms each on a big save): host mod garbage ~8 MB/s (mostly re-saving objects to check
+   them), joiner apply ~14 MB/s (parsing host JSON and re-serializing each object). Next ideas: per-type cheap
+   fingerprints for the background round; apply host JSON without the parse/ToString round trip. The joiner still
+   rebuilds blueprints with their building-to-be (nested ConverterFoundation) and huts that changed folk.
+   Workshop (Lua) mods run on the joiner too: ModStorage writes are blocked there (0.12.24); other mod APIs that
+   change the world (spawn objects, move bots) may still act locally (the digest removes extras).
 
 1. A real Steam session between two PCs. Collect the F8 bug report zip from both sides.
 2. Real medium/large late-game saves: join time, host frame cost.

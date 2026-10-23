@@ -27,11 +27,21 @@ namespace AutonautsCoop
         static readonly HashSet<int> badSave = new HashSet<int>();
         static List<int> ring = new List<int>(); static int ringIdx;
         public static int LastRescanned;
-        public static float RingSeconds = 20f;   // (things that stay put; what bots and players touch is looked at right away)
+        public static float RingSeconds = 40f;   // safety round for things that change on their own (growing); anything acted on is looked at right away (MarkDirty)
         public static double RingBudgetMs = 4.0;
 
         public static void Reset() { Cache.Clear(); parentOf.Clear(); force.Clear(); ring.Clear(); ringIdx = 0; }
         public static void Force(int uid) { force.Add(uid); }
+        /// Host: something happened to this object (the game's SendAction: added to, taken from, engaged, held...).
+        /// Look at it, or what it sits in, next scan instead of waiting for the slow round.
+        public static int StatDirty;
+        public static void MarkDirty(BaseClass b)
+        {
+            if (!b) return;
+            int uid = b.m_UniqueID; if (uid <= 0) return;
+            for (int i = 0; i < 8 && parentOf.TryGetValue(uid, out int p); i++) uid = p;
+            if (touchNext.Add(uid)) StatDirty++;
+        }
         public static bool IsNested(int uid) => parentOf.ContainsKey(uid);
 
         static bool Moves(BaseClass b) => b is Farmer || b is Animal || b is Vehicle;
@@ -50,7 +60,7 @@ namespace AutonautsCoop
                     if (t != null) { T(t.m_Building); T(t.m_BuildingFootprint); }
                 }
         }
-        public static float MoverFullEvery = 2f;
+        public static float MoverFullEvery = 8f;   // full re-save regardless of the fingerprint (bots someone has open: every scan)
         public static int StatMoverSaves, StatMoverSkips;
 
         /// What changes when a mover does something worth re-saving: tile, facing, state, hands, energy, engagement.
@@ -89,6 +99,12 @@ namespace AutonautsCoop
                 return;
             }
             if (!Cache.TryGetValue(uid, out var c) || c.B != b) { c = new C { B = b }; Cache[uid] = c; }
+            else if (c.Json != null && c.Json.Length == js.Length && c.Json == js)
+            {
+                // unchanged (most of the slow round): skip the normalizing pass, its strings were half the scan's garbage
+                c.Pos = b.transform.position; c.LastFull = now; LastRescanned++;
+                return;
+            }
             int h = Sync.Stable(b, js).GetHashCode();
             if (c.Json != null && c.Hash != h) c.HotUntil = now + 3f;
             c.Hash = h; c.Json = js; c.Pos = b.transform.position; c.LastFull = now;
@@ -145,7 +161,7 @@ namespace AutonautsCoop
                     // on a big base (a bot's save holds its whole program). Their movement goes out separately ("mv");
                     // re-save one only when something a cheap look can see changed, or once a second regardless.
                     long fp = Fingerprint(b);
-                    if (fp != c.Fp || now - c.LastFull > MoverFullEvery + (uid % 10) * 0.1f) { Rescan(b, now); c.Fp = fp; c.LastFull = now; StatMoverSaves++; }
+                    if (fp != c.Fp || Locks.Table.ContainsKey(uid) || now - c.LastFull > MoverFullEvery + (uid % 10) * 0.1f) { Rescan(b, now); c.Fp = fp; c.LastFull = now; StatMoverSaves++; }
                     else StatMoverSkips++;
                     // it picked something up or put something down: what it worked with changed too (storage, a
                     // machine's ingredients). Look at those next scan instead of waiting for the slow round.
@@ -196,6 +212,32 @@ namespace AutonautsCoop
         public static IEnumerable<KeyValuePair<int, C>> TopLevel()
         {
             foreach (var kv in Cache) if (!parentOf.ContainsKey(kv.Key) && kv.Value.B) yield return kv;
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Host: an action on an object (storage added to, machine given an ingredient, item picked up) marks it for the
+    // next scan, so the slow round can be slow without the joiner seeing stale contents.
+    // (Actionable.SendAction itself is empty and its base calls get inlined: patch every override instead.)
+    [HarmonyLib.HarmonyPatch]
+    static class P_HostDirtyOnAction
+    {
+        static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            foreach (var t in typeof(Actionable).Assembly.GetTypes())
+            {
+                if (!typeof(Actionable).IsAssignableFrom(t) || t.IsGenericTypeDefinition) continue;
+                var m = t.GetMethod("SendAction", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly, null, new[] { typeof(ActionInfo) }, null);
+                if (m != null && !m.IsAbstract && m.GetMethodBody() != null) yield return m;
+            }
+        }
+        static void Postfix(Actionable __instance, ActionInfo Info)
+        {
+            if (Coop.Role != Role.Host) return;
+            Scan.MarkDirty(__instance);
+            if (Info != null && Info.m_Object) Scan.MarkDirty(Info.m_Object);
         }
     }
 }

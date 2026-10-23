@@ -67,3 +67,35 @@ namespace AutonautsCoop
         }
     }
 }
+
+namespace AutonautsCoop
+{
+    /// Test kit (soak runs): on the joiner, log any Storage method that changes a stored count, with a stack (first
+    /// few). Finds what moves a count away from the host's.
+    public static class StoredTrace
+    {
+        static int logged, loggedA;
+        public static void Init(HarmonyLib.Harmony h)
+        {
+            if (!Soak.On) return;
+            var pre = new HarmonyLib.HarmonyMethod(typeof(StoredTrace).GetMethod(nameof(Pre), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic));
+            var fin = new HarmonyLib.HarmonyMethod(typeof(StoredTrace).GetMethod(nameof(Fin), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic));
+            int n = 0;
+            foreach (var t in new[] { typeof(Storage), typeof(StorageGeneric) })
+                foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly))
+                {
+                    if (m.IsAbstract || m.IsGenericMethodDefinition || m.GetMethodBody() == null || m.Name == "UpdateStored" || m.Name.StartsWith("Get")) continue;
+                    try { h.Patch(m, prefix: pre, finalizer: fin); n++; } catch { }
+                }
+            Plugin.Log("stored trace: " + n + " storage methods");
+        }
+        static void Pre(Storage __instance, out int __state) { __state = __instance ? __instance.m_Stored : 0; }
+        static void Fin(Storage __instance, int __state, System.Reflection.MethodBase __originalMethod)
+        {
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded || !__instance || __instance.m_Stored == __state) return;
+            if (Sync.Applying) { if (loggedA >= 8) return; loggedA++; } else { if (logged >= 12) return; logged++; }
+            string st = Environment.StackTrace.Replace("\n", " | ");
+            Diag.Log("stored trace " + __instance.m_UniqueID + ": " + __state + " -> " + __instance.m_Stored + " in " + __originalMethod.Name + (Sync.Applying ? " (applying)" : "") + ": " + st.Substring(0, Math.Min(1200, st.Length)));
+        }
+    }
+}
