@@ -219,11 +219,12 @@ namespace AutonautsCoop
             {
                 nextScan = now + ScanEvery;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
+                long ms0 = Prof.Mem;
                 msg = new JSONObject();
                 var rm = new JSONArray();
-                var seen = new HashSet<int>();
+                var seen = scanSeen; seen.Clear();   // reused: a fresh set of every uid each scan was ~2.5 MB/s of garbage
                 Scan.Step(true);
-                Prof.Add("scan", sw.Elapsed.TotalMilliseconds);
+                Prof.Add("scan", sw.Elapsed.TotalMilliseconds); Prof.Alloc("scan", ms0); ms0 = Prof.Mem;
                 // changed objects go out as their saved JSON text (no parse/re-serialize)
                 upText.Clear();
                 foreach (var kv in Scan.TopLevel())
@@ -247,9 +248,9 @@ namespace AutonautsCoop
                     msg["pv"] = pv; plotQ.Clear();
                 }
                 LastScanMs = sw.Elapsed.TotalMilliseconds;
-                Prof.Add("changes", LastScanMs);
+                Prof.Add("changes", LastScanMs); Prof.Alloc("diff", ms0);
             }
-            double t1 = Prof.Now;
+            double t1 = Prof.Now; long mm = Prof.Mem;
 
             if (now >= nextMove)
             {
@@ -274,7 +275,7 @@ namespace AutonautsCoop
                 if (an != null) { if (msg == null) msg = new JSONObject(); msg["an"] = an; }
             }
 
-            double t2 = Prof.Now; Prof.Add("movement", t2 - t1);
+            double t2 = Prof.Now; Prof.Add("movement", t2 - t1); Prof.Alloc("movement", mm); mm = Prof.Mem;
             if (((msg != null && msg.Count > 0) || upText.Count > 0) && !Coop.I.Host.AnyRecipient()) upText.Clear();   // nobody to tell (snapshot time)
             else if ((msg != null && msg.Count > 0) || upText.Count > 0)
             {
@@ -283,9 +284,9 @@ namespace AutonautsCoop
                 upText.Clear();
                 Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(body));
             }
-            double t3 = Prof.Now; Prof.Add("pack+send", t3 - t2);
+            double t3 = Prof.Now; Prof.Add("pack+send", t3 - t2); Prof.Alloc("pack+send", mm); mm = Prof.Mem;
             WorldState.HostTick();
-            double t4 = Prof.Now; Prof.Add("world sections", t4 - t3);
+            double t4 = Prof.Now; Prof.Add("world sections", t4 - t3); Prof.Alloc("sections", mm); mm = Prof.Mem;
 
             if (now >= nextDigest)
             {
@@ -296,7 +297,7 @@ namespace AutonautsCoop
                 foreach (var kv in sentHash) { if (!first) sb.Append(','); first = false; sb.Append(kv.Key).Append(',').Append(kv.Value); }
                 sb.Append("]}");
                 Coop.I.Host.Broadcast(Msg.Delta, Gz.Pack(sb.ToString()));
-                Prof.Add("digest", swd.Elapsed.TotalMilliseconds);
+                Prof.Add("digest", swd.Elapsed.TotalMilliseconds); Prof.Alloc("digest", mm);
             }
             Prof.Add("host sync total", Prof.Now - t0);
         }
@@ -332,6 +333,17 @@ namespace AutonautsCoop
             var n0 = JSON.Parse(json);
             Diag.In(from, n0);
             if ((string)n0["a"] == "mark") { Diag.HostMark(from); return; }
+            if ((string)n0["a"] == "chkobj")   // test: the world check found these different; log my side to compare
+            {
+                foreach (JSONNode x in n0["u"].AsArray)
+                {
+                    var b = ObjectTypeList.Instance.GetObjectFromUniqueID(x.AsInt, false);
+                    if (!b) { Plugin.Log("[test] stable host " + x.AsInt + ": (none)"); continue; }
+                    string js = SaveObject(b, out _);
+                    Plugin.Log("[test] stable host " + x.AsInt + ": " + Stable(b, js));
+                }
+                return;
+            }
             if ((string)n0["a"] == "chk")
             {
                 // send everything that changed first (stationary changes are otherwise picked up within ~5 s)
@@ -478,6 +490,7 @@ namespace AutonautsCoop
             early.Clear();
         }
 
+        static readonly HashSet<int> scanSeen = new HashSet<int>();
         public static double StatApplyMs, StatApplyMaxMs;
         public static void ClientApplyDelta(string json)
         {
@@ -719,6 +732,7 @@ namespace AutonautsCoop
                         b.GetComponent<Savable>().Load(o);
                         KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
+                        ApplyStored(b, o);
                         string got = Stable(b, SaveObject(b, out _));
                         if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; StatNestedInPlace++; return; }
                         LogDiff("nested " + (string)o["ID"], want, got);
@@ -767,6 +781,7 @@ namespace AutonautsCoop
                         b.GetComponent<Savable>().Load(o);
                         KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
+                        ApplyStored(b, o);
                         string got = Stable(b, SaveObject(b, out _));
                         if (b.m_UniqueID == uid && got == Stable(b, want)) { StatInPlace++; return; }
                         LogDiff((string)o["ID"], want, got);
@@ -849,6 +864,34 @@ namespace AutonautsCoop
         }
 
         /// Load only adds a bot's running script, fail-jump stack and instructions; clear them so a reload replaces them.
+        /// A storage's count is loaded into a temporary and only made real by a Refresh, which the game skips for a
+        /// storage that sits in another building (and Refresh isn't sent at all for an in-place update). Those kept the
+        /// old count on the joiner, failed the in-place check and were rebuilt over and over. Take the host's count.
+        static void ApplyStored(BaseClass b, JSONNode o)
+        {
+            void One(Storage st, JSONNode n)
+            {
+                if (!st || n == null || n["Stored"] == null || n["Stored"].IsNull) return;
+                int want = n["Stored"].AsInt;
+                if (st.m_Stored == want) return;
+                st.m_Stored = want;
+                HarmonyLib.Traverse.Create(st).Field("m_TempStored").SetValue(0);
+                st.UpdateStored();
+            }
+            try
+            {
+                One(b.GetComponent<Storage>(), o);
+                var lv = o["Levels"];
+                if (lv != null && !lv.IsNull)
+                    foreach (JSONNode l in lv.AsArray)
+                    {
+                        var lb = ObjectTypeList.Instance.GetObjectFromUniqueID(l["UID"].AsInt, false);
+                        if (lb) One(lb.GetComponent<Storage>(), l);
+                    }
+            }
+            catch (Exception e) { Plugin.Log("apply stored: " + e.Message); }
+        }
+
         static void ResetRuntime(BaseClass b)
         {
             var w = b as Worker;
@@ -981,6 +1024,7 @@ namespace AutonautsCoop
             if (bld) bld.PostLoad(o);
             b.GetComponent<Savable>().PostLoad();
             b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
+            ApplyStored(b, o);
             if (b.m_UniqueID != uid)
             {
                 // the UID was still taken: move the new object onto the host's UID so later updates find it
@@ -1179,5 +1223,61 @@ namespace AutonautsCoop
             if (list != null && list.TryGetValue(NewBaseClass.m_UniqueID, out var owner) && (object)owner != (object)NewBaseClass && owner) return false;
             return true;
         }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: removing a building blueprint that is mid-build (an old copy being replaced, or one the host finished)
+    // ran the game's "stage finished" code, which needs the blueprint's target building, already cleared by then.
+    // The exception stopped the removal half way: the old blueprint stayed in the world and threw every frame
+    // (~150 errors a second, each a log line with a stack trace: a big source of joiner hitches). Remove it as idle.
+    [HarmonyLib.HarmonyPatch(typeof(ConverterFoundation), nameof(ConverterFoundation.StopUsing))]
+    static class P_ClientFoundationStop
+    {
+        static void Prefix(ConverterFoundation __instance)
+        {
+            if (Coop.Role == Role.Client && __instance.m_State != Converter.State.Idle) __instance.m_State = Converter.State.Idle;
+        }
+    }
+
+    // Joiner: a blueprint without its target building (a leftover from the above in an older session) does nothing.
+    [HarmonyLib.HarmonyPatch(typeof(ConverterFoundation), "UpdateUpgrading")]
+    static class P_ClientFoundationNoTarget
+    {
+        static bool Prefix(ConverterFoundation __instance) => !(Coop.Role == Role.Client && __instance.m_NewBuilding == null);
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: placing a building (every rebuilt copy) made the game walk every bot's program and point its
+    // instructions for that building at the building's current access tile, and re-send moving bots there. The host's
+    // bot data already says where each bot is going; the rewrite made the joiner's bots differ from the host's (a
+    // bot recorded before its storage was moved keeps the old tile on the host) and cost a pass over every bot.
+    [HarmonyLib.HarmonyPatch(typeof(BuildingManager), "PatchUpWorkers")]
+    static class P_ClientNoPatchUpWorkers
+    {
+        static bool Prefix() => Coop.Role != Role.Client;   // also outside batches (deferred placement, the join load)
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: rebuilding a storage stack re-adds its levels, and the game treats each as a player stacking storage:
+    // every bot's program is pointed at the stack and recompiled (53 bots on a big base, for each rebuild). The host's
+    // bot data already has the result. Run it as during loading, which skips that part.
+    [HarmonyLib.HarmonyPatch(typeof(Storage), nameof(Storage.AddBuilding))]
+    static class P_ClientStackQuiet
+    {
+        // __state: 0 = not ours, 1 = was not loading, 2 = was loading (stacks can nest, so no shared field)
+        static void Prefix(out int __state)
+        {
+            __state = 0;
+            if (Coop.Role != Role.Client || SaveLoadManager.Instance == null) return;
+            __state = SaveLoadManager.Instance.m_Loading ? 2 : 1;
+            SaveLoadManager.Instance.m_Loading = true;
+        }
+        static void Finalizer(int __state) { if (__state != 0 && SaveLoadManager.Instance != null) SaveLoadManager.Instance.m_Loading = __state == 2; }
     }
 }

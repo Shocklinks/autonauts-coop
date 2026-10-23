@@ -149,7 +149,7 @@ namespace AutonautsCoop
             s.Add(el =>
             {
                 if (TestScript.Chk == null && el < 20f) return false;
-                TestScript.Checksum(out int c, out long sum);
+                TestScript.ChecksumAtChk(out int c, out long sum);
                 bool ok = TestScript.Chk != null && TestScript.Chk["count"].AsInt == c && TestScript.Chk["sum"].Value == sum.ToString();
                 if (TestScript.Chk != null && !ok && chkTries++ < 5) { TestScript.Chk = null; Req("chk"); return false; }
                 TestBot.Assert(me + ": world matches the host", ok, TestScript.Chk == null ? "no reply" : "host " + TestScript.Chk["count"].AsInt + " me " + c);

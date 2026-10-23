@@ -175,7 +175,7 @@ namespace AutonautsCoop
                         else if (inf["conv"] != null && !inf["conv"].IsNull) TestScript.ConvState = inf["conv"];
                         else if (inf["worldtest"] != null && !inf["worldtest"].IsNull) TestScript.WorldReply = inf["worldtest"];
                         else if (inf["tiletest"] != null && !inf["tiletest"].IsNull) TestScript.TileTest = inf["tiletest"];
-                        else if (inf["chk"] != null && !inf["chk"].IsNull) TestScript.Chk = inf["chk"];
+                        else if (inf["chk"] != null && !inf["chk"].IsNull) TestScript.OnChkReply(inf["chk"]);
                         else if (inf["tr"] != null && !inf["tr"].IsNull) TestScript.Reply = inf;
                         else if (inf["undo"] != null && !inf["undo"].IsNull) Build.SetUndoAvailable(inf["undo"].AsBool);
                         else if (inf["blob"] != null && !inf["blob"].IsNull) TestScript.Blob = inf;
@@ -204,11 +204,19 @@ namespace AutonautsCoop
                 SteamNet.Pump();
                 if (Role == Role.Host)
                 {
-                    double a = Prof.Now; HostUpdate(); double b = Prof.Now; Prof.Add("joiner input", b - a);
-                    Sync.HostTick(); double c = Prof.Now;
-                    Shared.HostTick(); Prof.Add("shared editors", Prof.Now - c);
+                    long m0 = Prof.Mem;
+                    double a = Prof.Now; HostUpdate(); double b = Prof.Now; Prof.Add("joiner input", b - a); Prof.Alloc("input", m0);
+                    long m1 = Prof.Mem;
+                    Sync.HostTick(); double c = Prof.Now; Prof.Alloc("sync", m1);
+                    long m2 = Prof.Mem;
+                    Shared.HostTick(); Prof.Add("shared editors", Prof.Now - c); Prof.Alloc("editors", m2);
                 }
-                else if (Role == Role.Client) { ClientUpdate(); Sync.ClientFrame(); UiRebind.Tick(); Shared.ClientTick(); Look.ClientTick(); }
+                else if (Role == Role.Client)
+                {
+                    long m0 = Prof.Mem; ClientUpdate(); Prof.Alloc("receive+apply", m0);
+                    long m1 = Prof.Mem; Sync.ClientFrame(); Prof.Alloc("frame", m1);
+                    long m2 = Prof.Mem; UiRebind.Tick(); Shared.ClientTick(); Look.ClientTick(); Prof.Alloc("ui", m2);
+                }
                 Diag.EchoTick();
                 Diag.Tick();
                 Session.Tick();   // after the inbox: a "lobby ended" message may sit right before the close

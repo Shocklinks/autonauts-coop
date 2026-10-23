@@ -211,7 +211,7 @@ namespace AutonautsCoop
             s.Add(el =>
             {
                 if (TestScript.Chk == null && el < 60f) return false;
-                TestScript.Checksum(out int c, out long sum);
+                TestScript.ChecksumAtChk(out int c, out long sum);
                 bool ok = TestScript.Chk != null && TestScript.Chk["count"].AsInt == c && TestScript.Chk["sum"].Value == sum.ToString();
                 if (TestScript.Chk != null && !ok && chkTries < 6)
                 {
@@ -220,7 +220,7 @@ namespace AutonautsCoop
                 }
                 if (!ok && TestScript.Chk != null)
                 {
-                    var mine = TestScript.Hashes(); var theirs = new Dictionary<int, int>(); var arr = TestScript.Chk["u"].AsArray;
+                    var mine = TestScript.HashesAtChk(); var theirs = new Dictionary<int, int>(); var arr = TestScript.Chk["u"].AsArray;
                     for (int i = 0; i + 1 < arr.Count; i += 2) theirs[arr[i].AsInt] = arr[i + 1].AsInt;
                     int only = 0, onlyHost = 0, diff = 0;
                     foreach (var kv in mine) if (!theirs.ContainsKey(kv.Key)) only++; else if (theirs[kv.Key] != kv.Value) diff++;

@@ -25,6 +25,16 @@ namespace AutonautsCoop
         // frame stats over a window
         static readonly List<float> frames = new List<float>();
         static void Frame() { frames.Add(Time.unscaledDeltaTime); }
+        static int gc0; static long alloc0; static float aloneStart;
+        /// Collections since the mark, the worst frame one landed in, and the garbage rate (all code, not just the mod).
+        static string GcLine()
+        {
+            float secs = Mathf.Max(1f, Time.realtimeSinceStartup - aloneStart);
+            string r = "; GC " + (Diag.GcTotal - gc0) + "x in " + secs.ToString("F0") + " s, worst GC frame " + (Diag.GcWorstEver * 1000).ToString("F0") + " ms, garbage "
+                + ((Diag.AllocTotal - alloc0) / 1048576.0 / secs).ToString("F1") + " MB/s";
+            gc0 = Diag.GcTotal; Diag.GcWorstEver = 0; alloc0 = Diag.AllocTotal; aloneStart = Time.realtimeSinceStartup;
+            return r;
+        }
         static string Fps()
         {
             if (frames.Count == 0) return "-";
@@ -80,8 +90,8 @@ namespace AutonautsCoop
                 frames.Clear();
                 return true;
             });
-            s.Add(el => { Frame(); return el > 10f; });
-            s.Add(el => { Info("host alone", Fps()); frames.Clear(); Coop.I.StartHost(TestBot.Port); hostStart = Time.realtimeSinceStartup; return true; });
+            s.Add(el => { if (el < 0.1f) { gc0 = Diag.GcTotal; Diag.GcWorstEver = 0; alloc0 = Diag.AllocTotal; aloneStart = Time.realtimeSinceStartup; } Frame(); return el > 40f; });
+            s.Add(el => { float secs = Time.realtimeSinceStartup - aloneStart; Info("host alone", Fps() + GcLine()); var gg = AllocProf.TakeReport(Mathf.Max(1f, secs)); if (gg != null) Info("host alone", gg); frames.Clear(); Coop.I.StartHost(TestBot.Port); hostStart = Time.realtimeSinceStartup; return true; });
             s.Add(el =>
             {
                 Frame();
@@ -92,7 +102,7 @@ namespace AutonautsCoop
             {
                 if (reported) return el > 2f;   // report once, then give the joiner a moment
                 reported = true;
-                Info("host with a joiner", Fps());
+                Info("host with a joiner", Fps() + GcLine());
                 Info("host scan", (scanN > 0 ? scanSum / scanN : 0).ToString("F1") + " ms avg, " + scanMax.ToString("F0") + " ms max; sent " + (Peer.BytesSent / 1048576f).ToString("F1") + " MB");
                 return false;
             });
@@ -134,22 +144,30 @@ namespace AutonautsCoop
         }
 
         /// Which objects differ from the host's (by type), and their JSON here in coop.log.
+        static readonly List<int> askUids = new List<int>();
         static string Differ(JSONArray u)
         {
             if (u == null) return "?";
             var host = new Dictionary<int, int>();
             for (int i = 0; i + 1 < u.Count; i += 2) host[u[i].AsInt] = u[i + 1].AsInt;
-            var mine = TestScript.Hashes();
+            var mine = TestScript.HashesAtChk();
             var types = new Dictionary<string, int>(); int logged = 0;
             void Note(int uid, string what)
             {
                 var b = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
                 string t = (b ? b.m_TypeIdentifier.ToString() : "?") + " " + what;
                 types[t] = types.TryGetValue(t, out int n) ? n + 1 : 1;
-                if (logged++ < 8) Plugin.Log("[test] differs: " + uid + " " + t + (b ? " here: " + Sync.SaveObject(b, out _) : ""));
+                if (logged++ < 8)
+                {
+                    string js = b ? Sync.SaveObject(b, out _) : null;
+                    Plugin.Log("[test] differs: " + uid + " " + t + (b ? " here: " + js : ""));
+                    if (b) Plugin.Log("[test] stable here " + uid + ": " + Sync.Stable(b, js));
+                    if (askUids.Count < 8) askUids.Add(uid);
+                }
             }
             foreach (var kv in host) { if (!mine.TryGetValue(kv.Key, out int h)) Note(kv.Key, "missing"); else if (h != kv.Value) Note(kv.Key, "different"); }
             foreach (var kv in mine) if (!host.ContainsKey(kv.Key)) Note(kv.Key, "extra");
+            if (askUids.Count > 0) { Req("chkobj", n => { var ua = new JSONArray(); foreach (var x in askUids) ua.Add(x); n["u"] = ua; }); askUids.Clear(); }   // host logs its side
             var parts = new List<string>(); foreach (var kv in types) parts.Add(kv.Key + " " + kv.Value);
             return string.Join(", ", parts.ToArray());
         }
@@ -244,16 +262,16 @@ namespace AutonautsCoop
                 TestBot.Assert("client: the program editor's 'not editable' cover clears", clear);
                 GameStateManager.Instance.GetCurrentState().GetComponent<GameStateNormal>()?.ClearSelectedWorkers();
                 CameraManager.Instance.Focus(Me().transform.position);
-                frames.Clear();
+                frames.Clear(); GcLine();
                 return true;
             });
             // watch the world for a while, then compare it with the host's
             s.Add(el => { Frame(); return el > WatchSeconds; });
-            s.Add(el => { Info("joiner while watching", Fps()); Info("joiner sync", "rebuilt " + Sync.StatRecreated + ", updated in place " + Sync.StatInPlace + ", received " + (Peer.BytesRecv / 1048576f).ToString("F1") + " MB, apply max " + Sync.StatApplyMaxMs.ToString("F0") + " ms, round trip " + (Coop.I.Client.Host.Rtt * 1000).ToString("F0") + " ms"); TestScript.Chk = null; Req("chk"); return true; });
+            s.Add(el => { Info("joiner while watching", Fps() + GcLine()); Info("joiner sync", "rebuilt " + Sync.StatRecreated + ", updated in place " + Sync.StatInPlace + ", received " + (Peer.BytesRecv / 1048576f).ToString("F1") + " MB, apply max " + Sync.StatApplyMaxMs.ToString("F0") + " ms, round trip " + (Coop.I.Client.Host.Rtt * 1000).ToString("F0") + " ms"); TestScript.Chk = null; Req("chk"); return true; });
             s.Add(el =>
             {
                 if (TestScript.Chk == null && el < 60f) return false;
-                TestScript.Checksum(out int c, out long sum);
+                TestScript.ChecksumAtChk(out int c, out long sum);
                 bool ok = TestScript.Chk != null && TestScript.Chk["count"].AsInt == c && TestScript.Chk["sum"].Value == sum.ToString();
                 if (TestScript.Chk != null && !ok && chkTries++ < 6) { TestScript.Chk = null; Req("chk"); return false; }
                 string why = TestScript.Chk == null ? "no reply" : "host " + TestScript.Chk["count"].AsInt + " objects, me " + c;

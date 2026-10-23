@@ -113,6 +113,17 @@ namespace AutonautsCoop
             foreach (var e in Sync.TopLevel()) { count++; sum += e.Hash; }
         }
 
+        /// Joiner: my world as it was when the host's checksum reply arrived (deltas keep landing after that, so
+        /// comparing a frame later raced the host's busy bots).
+        public static Dictionary<int, int> ChkMine;
+        public static void OnChkReply(JSONNode chk) { ChkMine = Hashes(); Chk = chk; }
+        public static Dictionary<int, int> HashesAtChk() => ChkMine ?? Hashes();
+        public static void ChecksumAtChk(out int count, out long sum)
+        {
+            if (ChkMine == null) { Checksum(out count, out sum); return; }
+            count = ChkMine.Count; sum = 0; foreach (var v in ChkMine.Values) sum += v;
+        }
+
         // ---------- host ----------
         public static void BuildHost(List<TestBot.IEnumeratorStep> s)
         {
@@ -1245,7 +1256,7 @@ namespace AutonautsCoop
             s.Add(el =>
             {
                 if (Chk == null && el < 15f) return false;
-                Checksum(out int c, out long sum);
+                ChecksumAtChk(out int c, out long sum);
                 bool ok = Chk != null && Chk["count"].AsInt == c && Chk["sum"].Value == sum.ToString();
                 // Animals/timers can change on the host inside one 200 ms scan window; ask again a few times.
                 if (Chk != null && !ok && chkTries < 4)
@@ -1256,7 +1267,7 @@ namespace AutonautsCoop
                 }
                 if (Chk != null && !ok)
                 {
-                    var mine = Hashes(); var theirs = new Dictionary<int, int>();
+                    var mine = HashesAtChk(); var theirs = new Dictionary<int, int>();
                     var arr = Chk["u"].AsArray;
                     for (int i = 0; i + 1 < arr.Count; i += 2) theirs[arr[i].AsInt] = arr[i + 1].AsInt;
                     int shown = 0;

@@ -170,17 +170,23 @@ namespace AutonautsCoop
 
         // ---------------- per frame ----------------
         static float nextSummary, frameSum, frameMax, gcWorst, plainWorst; static int frames, gcs, gcLast;
+        static long memLast, frameAlloc;
+        /// Running totals for the tests: collections, the worst frame one landed in, garbage made (bytes, all code).
+        public static int GcTotal; public static float GcWorstEver; public static long AllocTotal;
         static int lastSelectTarget = -2; static GameStateManager.State lastState = GameStateManager.State.Total;
         static long bytesIn0, bytesOut0; static int moverSaves0, moverSkips0; static int batches0, recreated0, inplace0; static double apply0;
 
         public static void Tick()
         {
             float dt = Time.unscaledDeltaTime;
+            AllocProf.FrameStart();
             frames++; frameSum += dt; if (dt > frameMax) frameMax = dt;
             // garbage collection pauses: a frame in which the collector ran
             int gcNow = GC.CollectionCount(0);
-            if (gcNow != gcLast) { gcs += gcNow - gcLast; gcLast = gcNow; if (dt > gcWorst) gcWorst = dt; }
-            else if (dt > plainWorst) plainWorst = dt;
+            long mem = Prof.Mem;
+            if (gcNow != gcLast) { gcs += gcNow - gcLast; GcTotal += gcNow - gcLast; gcLast = gcNow; if (dt > gcWorst) gcWorst = dt; if (dt > GcWorstEver) GcWorstEver = dt; }
+            else { if (dt > plainWorst) plainWorst = dt; if (mem > memLast) { frameAlloc += mem - memLast; AllocTotal += mem - memLast; } }
+            memLast = mem;
             if (Coop.Role == Role.Off) { nextSummary = 0; return; }
             if (!On) return;
             bool inGame = Coop.InGame();
@@ -247,6 +253,9 @@ namespace AutonautsCoop
             var sb = new StringBuilder("stats 10s: fps ").Append(fps.ToString("F0")).Append(" worst frame ").Append((frameMax * 1000).ToString("F0")).Append(" ms");
             sb.Append(" (GC ").Append(gcs).Append("x, worst GC frame ").Append((gcWorst * 1000).ToString("F0")).Append(" ms, worst other ").Append((plainWorst * 1000).ToString("F0")).Append(" ms, heap ").Append((GC.GetTotalMemory(false) / 1048576).ToString()).Append(" MB)");
             gcs = 0; gcWorst = 0; plainWorst = 0;
+            sb.Append(" | garbage ").Append((frameAlloc / 10485760.0).ToString("F1")).Append(" MB/s (coop: ").Append(Prof.TakeAllocReport(10f)).Append(')');
+            frameAlloc = 0;
+            var gg = AllocProf.TakeReport(10f); if (gg != null) sb.Append(" | ").Append(gg);
             sb.Append(" | in ").Append(((Peer.BytesRecv - bytesIn0) / 10240f).ToString("F1")).Append(" KB/s out ").Append(((Peer.BytesSent - bytesOut0) / 10240f).ToString("F1")).Append(" KB/s");
             if (Coop.Role == Role.Client)
             {
@@ -379,6 +388,28 @@ namespace AutonautsCoop
         static readonly Dictionary<string, P> parts = new Dictionary<string, P>();
         static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         public static double Now => clock.Elapsed.TotalMilliseconds;
+        /// Managed heap in use. Goes up as things are allocated, drops at a collection: the difference across a
+        /// piece of code (when no collection ran in between) is the garbage it made.
+        public static long Mem => GC.GetTotalMemory(false);
+        static readonly Dictionary<string, long> alloc = new Dictionary<string, long>();
+        public static void Alloc(string name, long before)
+        {
+            long d = Mem - before; if (d <= 0) return;   // a collection ran in between
+            alloc.TryGetValue(name, out long v); alloc[name] = v + d;
+        }
+        public static string TakeAllocReport(float seconds)
+        {
+            var list = new List<KeyValuePair<string, long>>(alloc);
+            list.Sort((a, b) => b.Value.CompareTo(a.Value));
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in list)
+            {
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(kv.Key).Append(' ').Append((kv.Value / 1048576.0 / seconds).ToString("F2"));
+            }
+            alloc.Clear();
+            return sb.ToString();
+        }
         public static void Add(string name, double ms)
         {
             if (!parts.TryGetValue(name, out var p)) parts[name] = p = new P();

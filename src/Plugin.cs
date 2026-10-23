@@ -1,5 +1,5 @@
 // AutonautsCoop - host-authoritative co-op for Autonauts
-// Version 0.12.5 - 2026-10-22 - Created with Claude
+// Version 0.12.14 - 2026-10-22 - Created with Claude
 using System;
 using System.IO;
 using BepInEx;
@@ -13,7 +13,7 @@ namespace AutonautsCoop
     {
         public static Plugin Instance;
         public static string LogPath;
-        public const string Version = "0.12.5";
+        public const string Version = "0.12.14";
 
         void Awake()
         {
@@ -26,7 +26,7 @@ namespace AutonautsCoop
             if (TestBot.Big || Multi.On || Environment.GetEnvironmentVariable("COOP_LOWTEX") == "1") { QualitySettings.masterTextureLimit = 3; Log("stress test: textures at 1/8 resolution"); }
             Diag.Init();
             Kit.LogSetup();
-            new Harmony("autonauts.coop").PatchAll();
+            var harmony = new Harmony("autonauts.coop"); harmony.PatchAll(); AllocProf.Init(harmony);
             Log("patched");
             var go = new GameObject("AutonautsCoop");
             DontDestroyOnLoad(go);

@@ -17,7 +17,7 @@ namespace AutonautsCoop
 {
     public static class Scan
     {
-        public class C { public BaseClass B; public int Hash; public string Json; public List<int> Nested; public float HotUntil; public Vector3 Pos; public long Fp; public float LastFull; }
+        public class C { public BaseClass B; public int Hash; public string Json; public List<int> Nested; public float HotUntil; public Vector3 Pos; public long Fp; public float LastFull; public int Act; }
 
         public static readonly Dictionary<int, C> Cache = new Dictionary<int, C>();
         static readonly Dictionary<int, int> parentOf = new Dictionary<int, int>();   // child uid -> parent uid
@@ -27,7 +27,7 @@ namespace AutonautsCoop
         static readonly HashSet<int> badSave = new HashSet<int>();
         static List<int> ring = new List<int>(); static int ringIdx;
         public static int LastRescanned;
-        public static float RingSeconds = 5f;
+        public static float RingSeconds = 20f;   // (things that stay put; what bots and players touch is looked at right away)
         public static double RingBudgetMs = 4.0;
 
         public static void Reset() { Cache.Clear(); parentOf.Clear(); force.Clear(); ring.Clear(); ringIdx = 0; }
@@ -35,7 +35,22 @@ namespace AutonautsCoop
         public static bool IsNested(int uid) => parentOf.ContainsKey(uid);
 
         static bool Moves(BaseClass b) => b is Farmer || b is Animal || b is Vehicle;
-        public static float MoverFullEvery = 1f;
+        static readonly HashSet<int> touchNext = new HashSet<int>();
+        public static int StatTouched;
+        static void Touch(Farmer f)
+        {
+            void T(BaseClass o) { if (o && o.m_UniqueID > 0) { touchNext.Add(o.m_UniqueID); StatTouched++; } }
+            T(f.m_GoToTargetObject); T(f.m_EngagedObject);
+            var tm = TileManager.Instance; var tc = f.m_TileCoord;
+            if (tm == null) return;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    var t = tm.GetTile(new TileCoord(tc.x + dx, tc.y + dy));
+                    if (t != null) { T(t.m_Building); T(t.m_BuildingFootprint); }
+                }
+        }
+        public static float MoverFullEvery = 2f;
         public static int StatMoverSaves, StatMoverSkips;
 
         /// What changes when a mover does something worth re-saving: tile, facing, state, hands, energy, engagement.
@@ -50,6 +65,14 @@ namespace AutonautsCoop
                 h = h * 31 + (f.m_FarmerCarry != null && f.m_FarmerCarry.m_CarryObject != null ? f.m_FarmerCarry.m_CarryObject.Count * 1000 + (int)f.m_FarmerCarry.GetTopObjectType() : 0);
                 h = h * 31 + (int)(f.m_Energy / 5f);
                 h = h * 31 + (f.m_EngagedObject ? f.m_EngagedObject.m_UniqueID : 0);
+            }
+            // a bot's program variables (counters, flags): they change while it stands still
+            if (b is Worker w && w.m_WorkerInterpreter != null)
+            {
+                var gv = w.m_WorkerInterpreter.m_GlobalVariables;
+                if (gv != null) for (int i = 0; i < gv.Length; i++) if (gv[i] != null) h = h * 31 + gv[i].GetHashCode();
+                var cs = w.m_WorkerInterpreter.GetCurrentScript();
+                if (cs != null && cs.m_LocalVariables != null) for (int i = 0; i < cs.m_LocalVariables.Length; i++) if (cs.m_LocalVariables[i] != null) h = h * 31 + cs.m_LocalVariables[i].GetHashCode();
             }
             return h;
         }
@@ -106,6 +129,7 @@ namespace AutonautsCoop
         public static void Step(bool host, int ringMin = 150)
         {
             float now = Time.realtimeSinceStartup;
+            if (touchNext.Count > 0) { foreach (var u in touchNext) force.Add(u); touchNext.Clear(); }
             done.Clear(); present.Clear(); LastRescanned = 0;
             foreach (var kv in Sync.Savables())
             {
@@ -121,8 +145,15 @@ namespace AutonautsCoop
                     // on a big base (a bot's save holds its whole program). Their movement goes out separately ("mv");
                     // re-save one only when something a cheap look can see changed, or once a second regardless.
                     long fp = Fingerprint(b);
-                    if (fp != c.Fp || now - c.LastFull > MoverFullEvery + (uid % 10) * 0.02f) { Rescan(b, now); c.Fp = fp; c.LastFull = now; StatMoverSaves++; }
+                    if (fp != c.Fp || now - c.LastFull > MoverFullEvery + (uid % 10) * 0.1f) { Rescan(b, now); c.Fp = fp; c.LastFull = now; StatMoverSaves++; }
                     else StatMoverSkips++;
+                    // it picked something up or put something down: what it worked with changed too (storage, a
+                    // machine's ingredients). Look at those next scan instead of waiting for the slow round.
+                    if (b is Farmer f)
+                    {
+                        int act = (int)f.m_State * 100000 + (f.m_FarmerCarry != null && f.m_FarmerCarry.m_CarryObject != null ? f.m_FarmerCarry.m_CarryObject.Count * 1000 + (int)f.m_FarmerCarry.GetTopObjectType() % 1000 : 0);
+                        if (act != c.Act) { c.Act = act; Touch(f); }
+                    }
                     continue;
                 }
                 if (now < c.HotUntil || (b.transform.position - c.Pos).sqrMagnitude > 0.0001f) Rescan(b, now);
