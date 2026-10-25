@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - kit.ps1
-# Version 0.12.15 - 2026-10-23 - Created with Claude
+# Version 0.12.25 - 2026-10-23 - Created with Claude
 #
 # Runs two copies of Autonauts on this PC (a host and a joiner), both driven by the mod's built-in test bots,
 # and collects the results in kit\results\<date>-<mode>\.
@@ -7,7 +7,7 @@
 #   - Your saves are only read. A save you pick is copied; the test plays the copy.
 #   - Steam is not started by the copies (no achievements, stats or playtime); they connect over 127.0.0.1.
 # Usually started from RunTests.bat (menu). Direct use:
-#   kit.ps1 -Mode full|save [-Save "<save name>"] [-Lag 150] [-Jitter 50] [-Game <dir>] [-Work <dir>] [-Minutes 45]
+#   kit.ps1 -Mode full|save|play [-Save "<save name>"] [-Lag 150] [-Jitter 50] [-Game <dir>] [-Work <dir>] [-Minutes 45]
 param(
     [string]$Mode = "",
     [string]$Save = "",
@@ -79,14 +79,22 @@ if (-not $Mode) {
     Say "  2) Full test with internet-like lag (150 ms each way + 50 ms jitter)"
     Say "  3) Your save: join it, walk, pick bots, open a program, watch, compare worlds (about 10 min)"
     Say "  4) Your save with internet-like lag"
-    $choice = Read-Host "Choose 1-4"
+    Say "  5) Play it yourself: host and joiner windows, no test bots (you control both)"
+    Say "  6) Play it yourself with internet-like lag"
+    $choice = Read-Host "Choose 1-6"
     switch ($choice) {
         "1" { $Mode = "full" }
         "2" { $Mode = "full"; $Lag = 150; $Jitter = 50 }
         "3" { $Mode = "save" }
         "4" { $Mode = "save"; $Lag = 150; $Jitter = 50 }
-        default { Fail "Choose 1, 2, 3 or 4." }
+        "5" { $Mode = "play" }
+        "6" { $Mode = "play"; $Lag = 150; $Jitter = 50 }
+        default { Fail "Choose 1 to 6." }
     }
+}
+if ($Mode -eq "play" -and -not $Save) {
+    $yn = Read-Host "Put one of your saves in the host's copy so you can load it? (y/n)"
+    if ($yn -match '^[yY]') { $Save = Pick-Save }
 }
 if ($Mode -eq "save" -and -not $Save) { $Save = Pick-Save }
 if ($Mode -eq "save" -and -not (Test-Path (Join-Path $SavesRoot $Save))) { Fail "Save not found: $Save" }
@@ -127,7 +135,7 @@ foreach ($r in @("host", "client")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $data "Saves") | Out-Null
     Remove-Item (Join-Path $d "player.log") -ErrorAction SilentlyContinue
 }
-if ($Mode -eq "save") {
+if ($Save -and ($Mode -eq "save" -or $Mode -eq "play")) {
     Say "  copying your save `"$Save`"..."
     & robocopy (Join-Path $SavesRoot $Save) (Join-Path $Work "data_host\Saves\$Save") /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { Fail "Copying the save failed (robocopy $LASTEXITCODE)" }
@@ -207,7 +215,8 @@ function Write-Digest([string]$dir, $summary) {
 
 # ---------------- run ----------------
 function Start-Role([string]$r) {
-    $env:COOP_TEST = $r
+    if ($Mode -eq "play") { Remove-Item Env:COOP_TEST -ErrorAction SilentlyContinue; $env:COOP_NAME = $(if ($r -eq "host") { "Host" } else { "Joiner" }) }
+    else { $env:COOP_TEST = $r; Remove-Item Env:COOP_NAME -ErrorAction SilentlyContinue }
     $env:COOP_DATA = Join-Path $Work "data_$r"
     $env:COOP_NOSTEAM = "1"; $env:COOP_BIND = "127.0.0.1"; $env:COOP_IP = "127.0.0.1"; $env:COOP_PORT = "$Port"
     $env:COOP_LAG = "$Lag"; $env:COOP_JITTER = "$Jitter"
@@ -225,6 +234,39 @@ $out = Join-Path $Kit "results\$stamp-$label"
 $resHost = Join-Path $Work "host\BepInEx\coop_test_host.txt"
 $resClient = Join-Path $Work "client\BepInEx\coop_test_client.txt"
 Remove-Item $resHost, $resClient -ErrorAction SilentlyContinue
+
+if ($Mode -eq "play") {
+    Say ""
+    Say "Starting the host and the joiner ($label). Two game windows open; no test bots." White
+    Say "  Host window:   start a new game or load (your save is under Load), then F8 > Host." White
+    Say "  Joiner window: F8 > join by IP 127.0.0.1, port 27015 > Join." White
+    Say "  Steam is off in both copies: names are Host and Joiner. F7 marks a moment in both diagnostics logs." White
+    Say "  Close both game windows when you're done; the logs are then saved to kit\results." White
+    $started = Get-Date
+    $ph = Start-Role "host"
+    Start-Sleep -Seconds 5
+    $pc = Start-Role "client"
+    $tick = 0
+    while (-not ($ph.HasExited -and $pc.HasExited)) {
+        Start-Sleep -Seconds 5
+        $tick++; if ($tick % 12 -eq 0) { Collect }
+    }
+    Collect
+    $summary = @(
+        "AutonautsCoop test kit - $label (played by hand) - $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
+        "Mod $ver   Game $Game",
+        $(if ($Save) { "Save copied for the host: $Save" } else { "No save copied" }),
+        "Lag: $Lag ms + $Jitter ms jitter each way",
+        "Took $([Math]::Round(((Get-Date) - $started).TotalMinutes, 1)) min",
+        ""
+    )
+    $summary | Set-Content -Path (Join-Path $out "summary.txt") -Encoding UTF8
+    try { Write-Digest $out $summary } catch {}
+    Set-Content -Path (Join-Path $Kit "results\latest.txt") -Value $out -Encoding UTF8
+    Say ""
+    Say "Saved: $out (digest.txt first). Tell Claude what you saw; it reads the logs from there." White
+    exit 0
+}
 
 Say ""
 Say "Starting the host and the joiner ($label). Two game windows open." White

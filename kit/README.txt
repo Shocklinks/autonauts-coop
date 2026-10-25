@@ -1,5 +1,5 @@
 AutonautsCoop test kit
-Version 0.12.15 - 2026-10-23 - Created with Claude
+Version 0.12.25 - 2026-10-23 - Created with Claude
 
 What it does
   Runs two copies of Autonauts on this PC, a host and a joiner. The mod's built-in test bots play both
@@ -18,6 +18,10 @@ How to run
        2) Full test with internet-like lag (150 ms each way + 50 ms jitter)
        3) Your save: join it, walk, pick bots with the whistle, open a bot's program, watch, compare worlds
        4) Your save with internet-like lag
+       5) Play it yourself: both windows, no test bots. In the host window start or load a game, then F8 > Host.
+          In the joiner window F8 > join by IP 127.0.0.1, port 27015. Close both windows when done: the logs
+          (and digest.txt) land in kit\results. Press F7 when something looks wrong: it marks the moment in both logs.
+       6) Play it yourself with internet-like lag
   3. Two game windows open. Leave them alone until the kit says RESULT.
   4. Tell Claude it finished. The results are in kit\results\ (newest folder; summary.txt first).
 
