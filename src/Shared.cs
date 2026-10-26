@@ -1,11 +1,12 @@
 // AutonautsCoop - Shared.cs - world state both sides can edit: the script library (bot server) and planning areas.
 // Also: game speed follows the host (joiners can't change it), and bot-server actions on bots go to the host.
-// Version 0.9.0 - 2026-10-21 - Created with Claude
+// Version 0.12.25 - 2026-10-25 - Created with Claude
 //
 // The script library and planning areas are plain manager data, not objects, and their editors change them with
 // direct calls and field writes. Instead of forwarding every small edit, the joiner watches the whole section while
 // its editor is open and sends the full section when it changes; the host replaces its copy and broadcasts it as a
-// normal world section. Last writer wins if two people edit at the same moment.
+// normal world section. Only one player edits a section at a time (SectionLocks): the first to open it holds it,
+// others get a message and their editor closes (library, planning) or their changes are put back (groups).
 using System;
 using System.Collections.Generic;
 using HarmonyLib;
@@ -21,6 +22,9 @@ namespace AutonautsCoop
         public Action<JSONNode> Replace;     // replace local state with this
         public Func<bool> Editing;           // local editor open: watch for changes
         public Func<bool> Busy;              // local editor holds references: wait before replacing
+        public string Label;                 // for messages ("the script library")
+        public Action Close;                 // close the local editor (null: can't, changes are put back instead)
+        bool requested, warned; JSONNode lastHost;
 
         // joiner
         int baseHash, pushedHash; float pushedAt; bool wasEditing; JSONNode deferred;
@@ -32,13 +36,49 @@ namespace AutonautsCoop
         static int H(JSONNode n) => n == null ? 0 : JSON.Parse(n.ToString()).ToString().GetHashCode();
         JSONNode held;   // host data that arrived while our own edit was in flight
 
-        public void ClientReset() { baseHash = H(Safe()); pushedHash = 0; deferred = null; held = null; wasEditing = false; }
+        public void ClientReset() { baseHash = H(Safe()); pushedHash = 0; deferred = null; held = null; wasEditing = false; lastHost = Safe(); requested = warned = false; }
+
+        /// Both sides: take the section's lock while editing, give it back when done; if someone else holds it,
+        /// say so and close the editor (or put the section back to the host's copy when the editor can't close).
+        public void LockTick()
+        {
+            bool ed = Editing();
+            bool mine = SectionLocks.Mine(Name), other = SectionLocks.HeldByOther(Name);
+            if (ed && other)
+            {
+                if (!warned) { warned = true; Menu.Toast(SectionLocks.Who(Name) + " is editing " + Label + ". Try again when they're done."); try { Close?.Invoke(); } catch { } }
+                return;
+            }
+            if (ed && !mine && !requested) { requested = true; SectionLocks.Request(Name, true); }
+            if (!ed && (mine || requested))
+            {
+                if (Coop.Role == Role.Client) Flush();   // last edits first
+                requested = false; SectionLocks.Request(Name, false);
+            }
+            if (!ed && warned)
+            {
+                warned = false;
+                // edited without the lock (bot groups can't be closed): back to the host's copy
+                if (Coop.Role == Role.Client && lastHost != null && H(Safe()) != H(lastHost)) { Sync.Applying = true; try { Replace(lastHost); baseHash = H(Safe()); } finally { Sync.Applying = false; } }
+            }
+        }
+
+        /// Joiner: the host refused our copy (someone else holds the lock): take the host's.
+        public void ClientRevert(JSONNode n)
+        {
+            pushedHash = 0; held = null; lastHost = n;
+            if (Busy()) { deferred = n; return; }
+            Sync.Applying = true; try { Replace(n); Replaces++; baseHash = H(Safe()); } finally { Sync.Applying = false; }
+        }
 
         JSONNode Safe() { try { return Save(); } catch (Exception e) { Plugin.Log("shared " + Name + " save: " + e.Message); return null; } }
 
         /// Joiner: send our copy now if it differs from what the host last gave us.
         public void Flush()
         {
+            if (SectionLocks.HeldByOther(Name)) return;   // someone else is editing: the host would refuse it
+            // (not yet granted is fine: the host takes a change while nobody holds the section, e.g. a script the
+            // joiner uploads and links to a bot in the same moment it opened the library)
             var n = Safe(); int h = H(n);
             if (n == null || h == baseHash || h == pushedHash) return;
             var m = new JSONObject(); m["a"] = "shared"; m["n"] = Name; m["s"] = n;
@@ -70,6 +110,7 @@ namespace AutonautsCoop
         /// Joiner: the host's section arrived.
         public void ClientIncoming(JSONNode n)
         {
+            lastHost = n;
             int h = H(n);
             if (pushedHash != 0)
             {
@@ -102,7 +143,8 @@ namespace AutonautsCoop
     {
         public static readonly SharedSection Scripts = new SharedSection
         {
-            Name = "Scripts",
+            Name = "Scripts", Label = "the script library",
+            Close = () => { if (Library.Open() != null) GameStateManager.Instance.PopState(); },
             Save = () => { var n = new JSONObject(); WorkerScriptManager.Instance.Save(n); return n; },
             Replace = Library.Replace,
             Editing = () => Library.Open() != null,
@@ -111,7 +153,8 @@ namespace AutonautsCoop
 
         public static readonly SharedSection Planning = new SharedSection
         {
-            Name = "Planning",
+            Name = "Planning", Label = "the planning areas",
+            Close = () => { if (PlanAreas.InPlanning()) GameStateManager.Instance.PopState(); },
             Save = PlanAreas.Save,
             Replace = PlanAreas.Replace,
             Editing = PlanAreas.InPlanning,
@@ -120,7 +163,7 @@ namespace AutonautsCoop
 
         public static readonly SharedSection WorkerGroups = new SharedSection
         {
-            Name = "WorkerGroups",
+            Name = "WorkerGroups", Label = "the bot groups",
             Save = Groups.Save,
             Replace = Groups.Replace,
             Editing = Groups.Editing,
@@ -130,28 +173,39 @@ namespace AutonautsCoop
         public static readonly SharedSection[] All = { Scripts, Planning, WorkerGroups };
         public static SharedSection Get(string name) { foreach (var s in All) if (s.Name == name) return s; return null; }
 
-        static float next;
+        static float next, nextHost;
         public static void ClientTick()
         {
             if (Coop.Role != Role.Client || !Coop.I.ClientLoaded || Time.realtimeSinceStartup < next) return;
             next = Time.realtimeSinceStartup + 0.25f;
-            foreach (var s in All) { try { s.ClientTick(); } catch (Exception e) { Plugin.Log("shared " + s.Name + ": " + e.Message); } }
+            foreach (var s in All) { try { s.ClientTick(); s.LockTick(); } catch (Exception e) { Plugin.Log("shared " + s.Name + ": " + e.Message); } }
             Speed.ClientTick();
         }
 
         public static void HostTick()
         {
-            foreach (var s in All) { try { s.HostTick(); } catch (Exception e) { Plugin.Log("shared " + s.Name + ": " + e.Message); } }
+            bool tick = Time.realtimeSinceStartup >= nextHost; if (tick) nextHost = Time.realtimeSinceStartup + 0.25f;
+            foreach (var s in All) { try { s.HostTick(); if (tick && Coop.I.Host.AnyRecipient()) s.LockTick(); } catch (Exception e) { Plugin.Log("shared " + s.Name + ": " + e.Message); } }
         }
 
         public static void OnClientLoaded() { foreach (var s in All) s.ClientReset(); }
 
-        public static bool HostApply(string a, JSONNode n, FarmerPlayer fp)
+        public static bool HostApply(string a, JSONNode n, FarmerPlayer fp, Peer from)
         {
+            if (a == "slock") { SectionLocks.HostSet("peer" + from.Id, from.Name, n["n"], n["on"].AsBool); return true; }
             if (a == "shared")
             {
                 var s = Get(n["n"]);
                 if (s == null || n["s"] == null || n["s"].IsNull) return true;
+                if (!SectionLocks.HostAllowed("peer" + from.Id, s.Name))
+                {
+                    // someone else holds it: keep ours and give the sender our copy back
+                    Plugin.Log("shared " + s.Name + " from " + from.Name + " refused: " + SectionLocks.Who(s.Name) + " is editing it");
+                    var r = new JSONObject(); r["srevert"] = s.Name; r["s"] = s.Save();
+                    r["note"] = SectionLocks.Who(s.Name) + " is editing " + s.Label + ": your change wasn't kept";
+                    from.Send(Msg.Info, System.Text.Encoding.UTF8.GetBytes(r.ToString()));
+                    return true;
+                }
                 try { s.HostIncoming(n["s"]); } catch (Exception e) { Plugin.Log("shared " + (string)n["n"] + " apply: " + e); }
                 return true;
             }
@@ -415,4 +469,75 @@ namespace AutonautsCoop
 
     [HarmonyPatch(typeof(TimeManager), nameof(TimeManager.SetTimeScale))]
     static class P_SpeedSet { static bool Prefix() => Coop.Role != Role.Client || Sync.Applying; }
+}
+
+
+namespace AutonautsCoop
+{
+    /// One editor per shared section (script library, planning areas, bot groups). The host owns the table and
+    /// broadcasts it; a joiner asks for a section when its editor opens and gives it back when it closes.
+    public static class SectionLocks
+    {
+        static readonly Dictionary<string, string> who = new Dictionary<string, string>();     // section -> player name
+        static readonly Dictionary<string, string> owner = new Dictionary<string, string>();   // section -> owner key
+        public static string Who(string sec) => who.TryGetValue(sec, out var w) ? w : "someone";
+        public static bool Mine(string sec) => owner.TryGetValue(sec, out var k) && k == Locks.MyKey;
+        public static bool HeldByOther(string sec) => owner.TryGetValue(sec, out var k) && k != Locks.MyKey;
+
+        public static void Request(string sec, bool on)
+        {
+            if (Coop.Role == Role.Host) { HostSet(Locks.HostKey, SteamNet.MyName() + " (host)", sec, on); return; }
+            if (Coop.Role != Role.Client || Coop.I.Client?.Host == null) return;
+            var n = new JSONObject(); n["a"] = "slock"; n["n"] = sec; n["on"] = on;
+            Coop.I.Client.Host.Send(Msg.Input, n.ToString());
+        }
+
+        // ---- host ----
+        public static void HostSet(string key, string name, string sec, bool on)
+        {
+            if (string.IsNullOrEmpty(sec)) return;
+            owner.TryGetValue(sec, out var cur);
+            if (on)
+            {
+                if (cur != null && cur != key) { Plugin.Log("section lock refused: " + name + " wants " + sec + ", held by " + who[sec]); Broadcast(); return; }
+                if (cur == key) return;
+                owner[sec] = key; who[sec] = name;
+                if (key != Locks.HostKey) { var s = Shared.Get(sec); Menu.Toast(name + " is editing " + (s != null ? s.Label : sec)); }
+            }
+            else
+            {
+                if (cur != key) return;
+                owner.Remove(sec); who.Remove(sec);
+            }
+            Diag.Log("section " + sec + (on ? " locked by " : " released by ") + name);
+            Broadcast();
+        }
+        public static bool HostAllowed(string key, string sec) => !owner.TryGetValue(sec, out var k) || k == key;
+        public static void HostPeerGone(Peer p)
+        {
+            string key = "peer" + p.Id; var gone = new List<string>();
+            foreach (var kv in owner) if (kv.Value == key) gone.Add(kv.Key);
+            foreach (var g in gone) HostSet(key, p.Name, g, false);
+        }
+        static void Broadcast()
+        {
+            if (Coop.I.Host == null) return;
+            var n = new JSONObject(); var arr = new JSONArray();
+            foreach (var kv in owner) { var e = new JSONArray(); e.Add(kv.Key); e.Add(who[kv.Key]); e.Add(kv.Value); arr.Add(e); }
+            n["slocks"] = arr;
+            Coop.I.Host.Broadcast(Msg.Info, System.Text.Encoding.UTF8.GetBytes(n.ToString()));
+        }
+
+        // ---- joiner ----
+        public static void ClientReceive(JSONArray arr)
+        {
+            var before = new Dictionary<string, string>(owner);
+            owner.Clear(); who.Clear();
+            foreach (JSONNode e in arr) { owner[e[0]] = e[2]; who[e[0]] = e[1]; }
+            foreach (var kv in owner)
+                if (kv.Value != Locks.MyKey && (!before.TryGetValue(kv.Key, out var b) || b != kv.Value))
+                { var s = Shared.Get(kv.Key); Menu.Toast(who[kv.Key] + " is editing " + (s != null ? s.Label : kv.Key)); }
+        }
+        public static void Reset() { owner.Clear(); who.Clear(); }
+    }
 }

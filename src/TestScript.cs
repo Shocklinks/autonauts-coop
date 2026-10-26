@@ -332,6 +332,9 @@ namespace AutonautsCoop
                 case "test_pause":
                     if (n["on"].AsBool) TimeManager.Instance.PauseAll(true); else TimeManager.Instance.UnPauseAll(true);
                     return true;
+                case "test_slock":
+                    SectionLocks.HostSet("test", "Host", "Scripts", n["on"].AsBool);   // its own owner: the host's editor isn't open, its tick would let go
+                    return true;
                 case "test_hostscript":
                 {
                     var hl = new HighInstructionList();
@@ -457,7 +460,7 @@ namespace AutonautsCoop
             if (UnityEngine.Time.realtimeSinceStartup > nextAsk) { nextAsk = UnityEngine.Time.realtimeSinceStartup + 1.5f; Ask(q, w); }
             return null;
         }
-        static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
+        static float slockAsk; static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
         // ---- bot selection test (8b) ----
         public static readonly List<int> wanderUids = new List<int>();
         static int selTrial, selHits, selFrame; static Worker selTarget, selClicked; static float selT;
@@ -1112,11 +1115,11 @@ namespace AutonautsCoop
             {
                 bool open = GameStateManager.Instance.GetActualState() == GameStateManager.State.BuildingSelect;
                 if (!open && el < 40f) return false;
+                var conv = open ? Obj(WbUid).GetComponent<Converter>() : null;
+                var res = conv ? conv.GetUnlockedResults() : null;
+                if (open && (res == null || res.Count == 0) && el < 12f) return false;   // unlock may still be on its way (wait before reporting: once)
                 TestBot.Assert("client: workbench menu opened on the joiner's screen", open, "opened " + Menus.Opened);
                 if (!open) return true;
-                var conv = Obj(WbUid).GetComponent<Converter>();
-                var res = conv.GetUnlockedResults();
-                if ((res == null || res.Count == 0) && el < 12f) return false;   // unlock may still be on its way
                 if (res == null || res.Count == 0)
                 {
                     var why = new List<string>();
@@ -1407,6 +1410,57 @@ namespace AutonautsCoop
                 var r = Poll(el, "lib", botUid, x => !HasName(x["names"], "CoopTestScript#") && x["link"].AsInt == -1);
                 if (r == null) return false;
                 TestBot.Assert("host: joiner deleted the script and the bot was unlinked", r == true, Reply?.ToString());
+                return true;
+            });
+            // 17b. one editor at a time: while the host has the library, the joiner's editor closes and its edits aren't kept
+            s.Add(el => { if (SectionLocks.Mine("Scripts") && el < 10f) return false; HostReq("test_slock", n => n["on"] = true); Menu.Toasts.Clear(); slockAsk = 0; return true; });   // our own hold from the last step must be gone first
+            s.Add(el =>
+            {
+                bool held = SectionLocks.HeldByOther("Scripts");
+                if (!held && el - slockAsk > 2f) { slockAsk = el; HostReq("test_slock", n => n["on"] = true); }   // (refused while ours was on its way out)
+                if (!held && el < 10f) return false;
+                TestBot.Assert("client: sees that the host is editing the script library", held);
+                var bot = Obj(botUid)?.GetComponent<Worker>();
+                if (BotServer.m_FirstBotServer != null && bot)
+                {
+                    GameStateManager.Instance.SetState(GameStateManager.State.Normal);
+                    GameStateManager.Instance.StartSelectBuilding(BotServer.m_FirstBotServer, ObjectType.BotServer);
+                }
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool closed = el > 1f && Library.Open() == null;
+                bool told = Menu.Toasts.Exists(t => t.Contains("is editing the script library"));
+                if (!(closed && told) && el < 10f) return false;
+                TestBot.Assert("client: library closes with a message while the host edits it", closed && told, "closed " + closed + ", told " + told);
+                // a push anyway (as if edited during the hand-over): the host must refuse it and send its copy back
+                var sec = Shared.Get("Scripts").Save();
+                WorkerScriptManager.Instance.AddScript("LockTestScript", new HighInstructionList(), ObjectType.WorkerHeadMk0, -1, -1, Color.white);
+                var m = new JSONObject(); m["a"] = "shared"; m["n"] = "Scripts"; m["s"] = Shared.Get("Scripts").Save();
+                Coop.I.Client.Host.Send(Msg.Input, m.ToString());
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool gone = true; foreach (var sc in WorkerScriptManager.Instance.m_Scripts) if (sc.m_Name == "LockTestScript") gone = false;
+                if (!gone && el < 10f) return false;
+                TestBot.Assert("client: an edit without the lock is put back to the host's copy", gone);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "lib", botUid, x => !HasName(x["names"], "LockTestScript#"));
+                if (r == null) return false;
+                TestBot.Assert("host: library unchanged by the joiner's push without the lock", r == true, Reply?.ToString());
+                HostReq("test_slock", n => n["on"] = false);
+                return true;
+            });
+            s.Add(el =>
+            {
+                bool free = !SectionLocks.HeldByOther("Scripts");
+                if (!free && el < 10f) return false;
+                TestBot.Assert("client: library free again when the host is done", free);
                 return true;
             });
             // 18. catapult: engage, aim, confirm -> the host's catapult gets the target

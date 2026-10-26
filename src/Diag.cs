@@ -170,7 +170,7 @@ namespace AutonautsCoop
 
         // ---------------- per frame ----------------
         static float nextSummary, frameSum, frameMax, gcWorst, plainWorst; static int frames, gcs, gcLast;
-        static long memLast, frameAlloc; static int bip0, vs0;
+        static long memLast, frameAlloc; static int bip0, vs0, sp0;
         /// Running totals for the tests: collections, the worst frame one landed in, garbage made (bytes, all code).
         public static int GcTotal; public static float GcWorstEver; public static long AllocTotal;
         static int lastSelectTarget = -2; static GameStateManager.State lastState = GameStateManager.State.Total;
@@ -263,7 +263,7 @@ namespace AutonautsCoop
                 sb.Append(" | rtt ").Append(h != null && h.Rtt >= 0 ? (h.Rtt * 1000).ToString("F0") + " ms" : "?");
                 int b = Sync.StatBatches - batches0;
                 sb.Append(" | batches ").Append(b).Append(" apply avg ").Append(b > 0 ? ((Sync.StatApplyMs - apply0) / b).ToString("F1") : "0").Append(" ms max ").Append(Sync.StatApplyMaxMs.ToString("F0"));
-                sb.Append(" | updated in place ").Append(Sync.StatInPlace - inplace0).Append(" (buildings with contents ").Append(Sync.StatBuildingInPlace - bip0).Append(", unchecked ").Append(Sync.StatVerifySkipped - vs0).Append(")").Append(" rebuilt ").Append(Sync.StatRecreated - recreated0); bip0 = Sync.StatBuildingInPlace; vs0 = Sync.StatVerifySkipped;
+                sb.Append(" | updated in place ").Append(Sync.StatInPlace - inplace0).Append(" (buildings with contents ").Append(Sync.StatBuildingInPlace - bip0).Append(", unchecked ").Append(Sync.StatVerifySkipped - vs0).Append(", same skipped unparsed ").Append(Sync.StatSkippedParse - sp0).Append(")").Append(" rebuilt ").Append(Sync.StatRecreated - recreated0); bip0 = Sync.StatBuildingInPlace; vs0 = Sync.StatVerifySkipped; sp0 = Sync.StatSkippedParse;
                 Sync.StatApplyMaxMs = 0;
                 if (Sync.StatRecreated - recreated0 > 0)
                 {
@@ -277,8 +277,8 @@ namespace AutonautsCoop
             }
             else if (Coop.Role == Role.Host && Coop.I.Host != null)
             {
-                sb.Append(" | scan ").Append(Sync.LastScanMs.ToString("F1")).Append(" ms (movers re-saved ").Append(Scan.StatMoverSaves - moverSaves0).Append(", skipped ").Append(Scan.StatMoverSkips - moverSkips0).Append(", acted on ").Append(Scan.StatDirty).Append(") | objects ").Append(Coop.ObjectCount());
-                Scan.StatDirty = 0;
+                sb.Append(" | scan ").Append(Sync.LastScanMs.ToString("F1")).Append(" ms (movers re-saved ").Append(Scan.StatMoverSaves - moverSaves0).Append(", skipped ").Append(Scan.StatMoverSkips - moverSkips0).Append(", acted on ").Append(Scan.StatDirty).Append(", still: saved ").Append(Scan.StatRingSaves).Append(" looked ").Append(Scan.StatRingSkips).Append(") | objects ").Append(Coop.ObjectCount());
+                Scan.StatDirty = 0; Scan.StatRingSaves = 0; Scan.StatRingSkips = 0;
                 lock (Coop.I.Host.Peers)
                     foreach (var p in Coop.I.Host.Peers)
                         if (p.Alive && p.Name != "?") sb.Append(" | ").Append(p.Name).Append(" rtt ").Append(p.Rtt >= 0 ? (p.Rtt * 1000).ToString("F0") + " ms" : "?");

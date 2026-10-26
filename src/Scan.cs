@@ -17,7 +17,7 @@ namespace AutonautsCoop
 {
     public static class Scan
     {
-        public class C { public BaseClass B; public int Hash; public string Json; public List<int> Nested; public float HotUntil; public Vector3 Pos; public long Fp; public float LastFull; public int Act; }
+        public class C { public BaseClass B; public int Hash; public string Json; public List<int> Nested; public float HotUntil; public Vector3 Pos; public long Fp, Fp2; public float LastFull; public int Act; }
 
         public static readonly Dictionary<int, C> Cache = new Dictionary<int, C>();
         static readonly Dictionary<int, int> parentOf = new Dictionary<int, int>();   // child uid -> parent uid
@@ -27,7 +27,9 @@ namespace AutonautsCoop
         static readonly HashSet<int> badSave = new HashSet<int>();
         static List<int> ring = new List<int>(); static int ringIdx;
         public static int LastRescanned;
-        public static float RingSeconds = 40f;   // safety round for things that change on their own (growing); anything acted on is looked at right away (MarkDirty)
+        public static float FpRingSeconds = 4f;    // cheap look (fingerprint) at everything still, this often
+        public static float SafetySeconds = 60f;   // full re-save regardless of the fingerprint, this often
+        public static int StatRingSaves, StatRingSkips;
         public static double RingBudgetMs = 4.0;
 
         public static void Reset() { Cache.Clear(); parentOf.Clear(); force.Clear(); ring.Clear(); ringIdx = 0; }
@@ -66,8 +68,8 @@ namespace AutonautsCoop
         /// What changes when a mover does something worth re-saving: tile, facing, state, hands, energy, engagement.
         static long Fingerprint(BaseClass b)
         {
-            var t = b.GetComponent<TileCoordObject>();
-            long h = t ? (t.m_TileCoord.x * 73856093L) ^ (t.m_TileCoord.y * 19349663L) : 0;
+            // (no tile: where it walks goes out in the movement stream; its saved tile isn't compared, see Sync.Stable)
+            long h = 17;
             h = h * 31 + (int)(b.transform.eulerAngles.y / 45f);
             if (b is Farmer f)
             {
@@ -87,6 +89,39 @@ namespace AutonautsCoop
             return h;
         }
 
+        // ---- cheap look at a still object: tile, height, facing and the fields that change in play ----
+        static readonly string[] fpNames = { "m_State", "m_Stored", "m_ObjectType", "m_Stage", "m_UsageCount", "m_NumCreated",
+            "m_ResultsToCreate", "m_Rotation", "m_Flipped", "m_Name", "m_ChangeTypeLocked", "m_Capacity", "m_Fuel", "m_Energy",
+            "m_Water", "m_Food", "m_NewState", "m_Slow", "m_Dug", "m_Watered", "m_Fertilised" };
+        static readonly string[] fpLists = { "m_Ingredients", "m_Levels", "m_Folks", "m_Used" };
+        static readonly Dictionary<Type, System.Reflection.FieldInfo[]> fpFieldsOf = new Dictionary<Type, System.Reflection.FieldInfo[]>();
+        static readonly Dictionary<Type, System.Reflection.FieldInfo[]> fpListsOf = new Dictionary<Type, System.Reflection.FieldInfo[]>();
+        static System.Reflection.FieldInfo[] FieldsOf(Type t, string[] names, Dictionary<Type, System.Reflection.FieldInfo[]> cache, bool lists)
+        {
+            if (cache.TryGetValue(t, out var fs)) return fs;
+            var l = new List<System.Reflection.FieldInfo>();
+            foreach (var n in names)
+            {
+                var f = HarmonyLib.AccessTools.Field(t, n);
+                if (f == null || f.IsStatic) continue;
+                if (lists ? typeof(System.Collections.ICollection).IsAssignableFrom(f.FieldType) : (f.FieldType.IsPrimitive || f.FieldType.IsEnum || f.FieldType == typeof(string))) l.Add(f);
+            }
+            return cache[t] = l.ToArray();
+        }
+        static long StaticFp(BaseClass b)
+        {
+            long h = 17;
+            var tco = b as TileCoordObject;
+            if (tco) h = (tco.m_TileCoord.x * 73856093L) ^ (tco.m_TileCoord.y * 19349663L);
+            var tr = b.transform;
+            h = h * 31 + (int)(tr.position.y * 20f);
+            h = h * 31 + (int)(tr.eulerAngles.y / 45f);
+            var t = b.GetType();
+            foreach (var f in FieldsOf(t, fpNames, fpFieldsOf, false)) { var v = f.GetValue(b); h = h * 31 + (v != null ? v.GetHashCode() : 0); }
+            foreach (var f in FieldsOf(t, fpLists, fpListsOf, true)) { var v = f.GetValue(b) as System.Collections.ICollection; h = h * 31 + (v != null ? v.Count : -1); }
+            return h;
+        }
+
         static void Rescan(BaseClass b, float now)
         {
             int uid = b.m_UniqueID;
@@ -101,13 +136,15 @@ namespace AutonautsCoop
             if (!Cache.TryGetValue(uid, out var c) || c.B != b) { c = new C { B = b }; Cache[uid] = c; }
             else if (c.Json != null && c.Json.Length == js.Length && c.Json == js)
             {
-                // unchanged (most of the slow round): skip the normalizing pass, its strings were half the scan's garbage
+                // unchanged: skip the normalizing pass, its strings were half the scan's garbage
                 c.Pos = b.transform.position; c.LastFull = now; LastRescanned++;
+                if (!Moves(b)) c.Fp2 = StaticFp(b);
                 return;
             }
             int h = Sync.Stable(b, js).GetHashCode();
             if (c.Json != null && c.Hash != h) c.HotUntil = now + 3f;
             c.Hash = h; c.Json = js; c.Pos = b.transform.position; c.LastFull = now;
+            if (!Moves(b)) c.Fp2 = StaticFp(b);
             LastRescanned++;
             // children named inside this save
             List<int> kids = null;
@@ -176,14 +213,23 @@ namespace AutonautsCoop
             }
             // a slice of everything else
             if (ringIdx >= ring.Count) { ring = new List<int>(Cache.Keys); ringIdx = 0; }
-            int slice = Math.Max(ringMin, (int)(ring.Count * Sync.ScanEvery / RingSeconds) + 1);
+            // host: a cheap look at everything still every few seconds, a full save only when that look changed (or
+            // every SafetySeconds); joiner: full saves (it only re-checks itself for the digest)
+            int slice = host ? Math.Max(ringMin, (int)(ring.Count * Sync.ScanEvery / FpRingSeconds) + 1) : Math.Max(ringMin, (int)(ring.Count * Sync.ScanEvery / 40f) + 1);
             double rs = Prof.Now;
             for (int n = 0; n < slice && ringIdx < ring.Count; ringIdx++)
             {
                 if (host && n >= 40 && (n & 15) == 0 && Prof.Now - rs > RingBudgetMs) break;   // spread the round; the rest goes next scan
                 int uid = ring[ringIdx];
                 if (done.Contains(uid) || !present.Contains(uid) || parentOf.ContainsKey(uid) || !Cache.TryGetValue(uid, out var c) || !c.B) continue;
-                Rescan(c.B, now); n++;
+                n++;
+                if (host && !Moves(c.B))
+                {
+                    long fp = StaticFp(c.B);
+                    if (fp == c.Fp2 && now - c.LastFull < SafetySeconds + (uid % 20)) { StatRingSkips++; continue; }
+                    StatRingSaves++;
+                }
+                Rescan(c.B, now);
             }
             DropMissing(false);
             force.Clear();

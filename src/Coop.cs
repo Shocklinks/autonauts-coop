@@ -164,10 +164,12 @@ namespace AutonautsCoop
                         var inf = JSON.Parse(Encoding.UTF8.GetString(p.Data));
                         if (inf["reject"] != null && !inf["reject"].IsNull) { Session.ClientLost((string)inf["reject"], true); return; }
                         if (inf["end"] != null && !inf["end"].IsNull) { Session.ClientLost((string)inf["end"], true); return; }
+                        if (inf["srevert"] != null && !inf["srevert"].IsNull) { Shared.Get(inf["srevert"])?.ClientRevert(inf["s"]); if (inf["note"] != null) Menu.Toast(inf["note"]); break; }
                         if (inf["note"] != null && !inf["note"].IsNull) { Menu.Toast(inf["note"]); break; }
                         if (inf["hostlog"] != null && !inf["hostlog"].IsNull) { BugReport.ClientGotHostLog(inf["hostlog"], inf["hostdiag"] != null && !inf["hostdiag"].IsNull ? (string)inf["hostdiag"] : null); break; }
                         if (inf["you"] != null && !inf["you"].IsNull) { Sync.MyPlayerUID = inf["you"].AsInt; Locks.MyKey = inf["key"]; Plugin.Log("my player uid " + Sync.MyPlayerUID + " key " + Locks.MyKey); }
                         else if (inf["locks"] != null && !inf["locks"].IsNull) Locks.ClientReceive(inf["locks"].AsArray);
+                        else if (inf["slocks"] != null && !inf["slocks"].IsNull) SectionLocks.ClientReceive(inf["slocks"].AsArray);
                         else if (inf["open"] != null && !inf["open"].IsNull) Menus.ClientOpen(inf);
                         else if (inf["wb"] != null && !inf["wb"].IsNull) TestScript.WbUid = inf["wb"].AsInt;
                         else if (inf["wardrobe"] != null && !inf["wardrobe"].IsNull) TestScript.WardrobeUid = inf["wardrobe"].AsInt;

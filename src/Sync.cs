@@ -51,6 +51,15 @@ namespace AutonautsCoop
         // modded item saves "Used":0 on one machine but not the other. Neither matters.
         static readonly System.Text.RegularExpressions.Regex ChildPos = new System.Text.RegularExpressions.Regex("(\\{\"ID\":\"[^\"]*\",\"UID\":-?\\d+),\"TX\":-?\\d+,\"TY\":-?\\d+");
         static readonly System.Text.RegularExpressions.Regex UsedZero = new System.Text.RegularExpressions.Regex(",\"Used\":0(?=[,}])");
+        static readonly System.Text.RegularExpressions.Regex Instruction = new System.Text.RegularExpressions.Regex(",\"Instruction\":-?\\d+");
+        /// Drop the object's own ,"TX":n,"TY":n (the first one: its own comes before its children's).
+        static string StripOwnTile(string json)
+        {
+            int i = json.IndexOf(",\"TX\":", StringComparison.Ordinal); if (i < 0) return json;
+            int j = json.IndexOf(",\"TY\":", i + 6, StringComparison.Ordinal); if (j < 0 || j > i + 20) return json;
+            int k = j + 6; while (k < json.Length && (char.IsDigit(json[k]) || json[k] == '-')) k++;
+            return json.Remove(i, k - i);
+        }
         public static string Stable(BaseClass b, string json)
         {
             // (each pass only when its text is there: this runs for every object looked at, and the passes made garbage)
@@ -62,6 +71,8 @@ namespace AutonautsCoop
             }
             if (json.IndexOf("\"Used\":0", StringComparison.Ordinal) >= 0) json = UsedZero.Replace(json, "");
             if (json.IndexOf(",\"STT\":", StringComparison.Ordinal) >= 0) json = VolatileAll.Replace(json, "");
+            if (b is Farmer || b is Animal || b is Vehicle) json = StripOwnTile(json);   // movers: position goes in "mv"
+            if (b is Worker && json.IndexOf("\"Instruction\":", StringComparison.Ordinal) >= 0) json = Instruction.Replace(json, "");   // current line goes in "ip"
             if (b is Animal) json = VolatileAnimal.Replace(json, "");
             else if (b is Floor2D || IsPath(b.m_TypeIdentifier)) json = Rotation.Replace(json, "");   // paths/flooring pick their look from neighbours on each machine
             return json;
@@ -238,6 +249,7 @@ namespace AutonautsCoop
                 if (!pp.Alive)
                 {
                     Locks.HostPeerGone(pp);
+                    SectionLocks.HostPeerGone(pp);
                     var fpo = ObjectTypeList.Instance.GetObjectFromUniqueID(PeerPlayers[pp], false);
                     PeerPlayers.Remove(pp);
                     try { Persist.Park(Persist.Key(pp), fpo); } catch (Exception e) { Plugin.Log("park: " + e); }
@@ -307,6 +319,20 @@ namespace AutonautsCoop
                     mv.Add(a);
                 }
                 if (mv.Count > 0) { if (msg == null) msg = new JSONObject(); msg["mv"] = mv; }
+                // bots' current program line (what the program editor highlights): small, so it goes every time it changes
+                var ip = new JSONArray();
+                var workers = CollectionManager.Instance.GetCollection("Worker");
+                if (workers != null) foreach (var kv in workers)
+                {
+                    var w = kv.Key as Worker;
+                    if (!w || w.m_UniqueID <= 0 || w.m_WorkerInterpreter == null) continue;
+                    var cs = w.m_WorkerInterpreter.GetCurrentScript();
+                    int line = cs != null ? cs.m_CurrentInstruction : -1;
+                    if (sentIp.TryGetValue(w.m_UniqueID, out int was) && was == line) continue;
+                    sentIp[w.m_UniqueID] = line;
+                    ip.Add(w.m_UniqueID); ip.Add(line);
+                }
+                if (ip.Count > 0) { if (msg == null) msg = new JSONObject(); msg["ip"] = ip; }
                 var an = Anim.HostTake();
                 if (an != null) { if (msg == null) msg = new JSONObject(); msg["an"] = an; }
             }
@@ -383,10 +409,10 @@ namespace AutonautsCoop
                 }
                 return;
             }
-            if ((string)n0["a"] == "chk")
+            if ((string)n0["a"] == "chk" || (string)n0["a"] == "chknf")
             {
-                // send everything that changed first (stationary changes are otherwise picked up within ~5 s)
-                Scan.Full(); nextScan = 0; HostTick();
+                // send everything that changed first ("chknf": don't: how far behind is the joiner in normal play?)
+                if ((string)n0["a"] == "chk") { Scan.Full(); nextScan = 0; HostTick(); }
                 TestScript.Checksum(out int c, out long sum);
                 var r = new JSONObject(); var o = new JSONObject(); o["count"] = c; o["sum"] = sum.ToString(); r["chk"] = o;
                 var u = new JSONArray(); foreach (var kv in TestScript.Hashes()) { u.Add(kv.Key); u.Add(kv.Value); } o["u"] = u;
@@ -472,7 +498,7 @@ namespace AutonautsCoop
             if (Menus.HostApply((string)n["a"], n, fp)) return;
             if (MenuActApply.HostApply((string)n["a"], n, fp)) return;
             if (KeyApply.HostApply((string)n["a"], n, fp)) return;
-            if (Shared.HostApply((string)n["a"], n, fp)) return;
+            if (Shared.HostApply((string)n["a"], n, fp, from)) return;
             if (Look.HostApply((string)n["a"], n, fp)) return;
             switch ((string)n["a"])
             {
@@ -531,6 +557,7 @@ namespace AutonautsCoop
         }
 
         static readonly HashSet<int> scanSeen = new HashSet<int>();
+        static readonly Dictionary<int, int> sentIp = new Dictionary<int, int>();
         public static double StatApplyMs, StatApplyMaxMs;
         public static void ClientApplyDelta(string json)
         {
@@ -601,7 +628,8 @@ namespace AutonautsCoop
         {
             StatBatches++;
             if (destroyedLastBatch) { destroyedLastBatch = false; PurgeDead(); }
-            var n = JSON.Parse(json);
+            var ups = SplitUp(json, out string rest);
+            var n = JSON.Parse(ups != null ? rest : json);
             Applying = true;
             // Same mode the game's own loader uses: new objects keep the UID from the JSON and register in Load.
             ObjectTypeList.m_Loading = true;
@@ -616,13 +644,23 @@ namespace AutonautsCoop
                 var rm = n["rm"];
                 if (rm != null) foreach (JSONNode u in rm.AsArray) Guard("rm", () => Remove(u.AsInt));
                 var up = n["up"];
-                if (up != null)
+                if (ups != null && ups.Count > 0)
                 {
-                    foreach (JSONNode o in up.AsArray) Guard("up " + o["ID"], () => Upsert(o));
+                    foreach (var raw in ups) Guard("up", () => UpsertRaw(raw));
                     // Recreating a holder can destroy objects that were applied earlier in this batch.
-                    foreach (JSONNode o in up.AsArray)
-                        if (!ObjectTypeList.Instance.GetObjectFromUniqueID(o["UID"].AsInt, false))
-                            Guard("re-up " + o["ID"], () => { StatCreated++; Create(o); });
+                    foreach (var raw in ups)
+                        if (!ObjectTypeList.Instance.GetObjectFromUniqueID(RawUid(raw), false))
+                            Guard("re-up", () => { StatCreated++; Create(JSON.Parse(raw)); });
+                }
+                if (ups != null && ups.Count > 0 || up != null)
+                {
+                    if (up != null)
+                    {
+                        foreach (JSONNode o in up.AsArray) Guard("up " + o["ID"], () => Upsert(o));
+                        foreach (JSONNode o in up.AsArray)
+                            if (!ObjectTypeList.Instance.GetObjectFromUniqueID(o["UID"].AsInt, false))
+                                Guard("re-up " + o["ID"], () => { StatCreated++; Create(o); });
+                    }
                     // Children we cleared that the parent didn't rebuild (they live on their own on the host): ask again.
                     var need = new JSONArray();
                     foreach (var c in touchedNested) if (!ObjectTypeList.Instance.GetObjectFromUniqueID(c, false)) need.Add(c);
@@ -638,6 +676,8 @@ namespace AutonautsCoop
                     var plot = PlotManager.Instance.m_Plots[i.AsInt];
                     if (!plot.m_Visible) plot.SetVisible(true, true);
                 }
+                var ipl = n["ip"];
+                if (ipl != null) { var ia = ipl.AsArray; for (int i = 0; i + 1 < ia.Count; i += 2) SetLine(ia[i].AsInt, ia[i + 1].AsInt); }
                 var mv = n["mv"];
                 if (mv != null) foreach (JSONNode a in mv.AsArray)
                 {
@@ -650,6 +690,59 @@ namespace AutonautsCoop
                 }
             }
             finally { ObjectTypeList.m_Loading = false; Applying = false; }
+        }
+
+        static void SetLine(int uid, int line)
+        {
+            var w = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) as Worker;
+            if (!w || w.m_WorkerInterpreter == null || line < 0) return;
+            var cs = w.m_WorkerInterpreter.GetCurrentScript();
+            if (cs != null) cs.m_CurrentInstruction = line;
+        }
+
+        public static int StatSkippedParse;
+        /// The host sends changed objects as {"up":[<saved text>,...], ...}. Take each object's text as sent: no parse of
+        /// the whole batch and no re-printing each object to compare (both were garbage), and an object we already
+        /// match is skipped before it is parsed at all.
+        static List<string> SplitUp(string json, out string rest)
+        {
+            rest = null;
+            const string head = "{\"up\":[";
+            if (!json.StartsWith(head, StringComparison.Ordinal)) return null;
+            var list = new List<string>();
+            int i = head.Length, depth = 0, start = -1; bool str = false;
+            for (; i < json.Length; i++)
+            {
+                char ch = json[i];
+                if (str) { if (ch == '\\') i++; else if (ch == '"') str = false; continue; }
+                if (ch == '"') { str = true; continue; }
+                if (ch == '{' || ch == '[') { if (depth == 0 && ch == '{') start = i; depth++; }
+                else if (ch == '}' || ch == ']')
+                {
+                    if (depth == 0) break;   // the end of "up"
+                    depth--;
+                    if (depth == 0 && start >= 0) { list.Add(json.Substring(start, i - start + 1)); start = -1; }
+                }
+            }
+            if (i >= json.Length) return null;
+            rest = i + 1 < json.Length && json[i + 1] == ',' ? "{" + json.Substring(i + 2) : "{}";
+            return list;
+        }
+        static int RawUid(string raw)
+        {
+            int i = raw.IndexOf("\"UID\":", StringComparison.Ordinal); if (i < 0) return 0;
+            i += 6; int v = 0; bool neg = false; if (i < raw.Length && raw[i] == '-') { neg = true; i++; }
+            while (i < raw.Length && char.IsDigit(raw[i])) { v = v * 10 + (raw[i] - '0'); i++; }
+            return neg ? -v : v;
+        }
+        static void UpsertRaw(string raw)
+        {
+            int uid = RawUid(raw);
+            var b = uid > 0 ? ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) : null;
+            if (b && uid != Teach.EditingUid() && applied.TryGetValue(uid, out var ap) && ap.Key == b && ap.Value == StableW(b, raw).GetHashCode()
+                && !(b.transform.parent && b.transform.parent.GetComponentInParent<BaseClass>()))
+            { StatSame++; StatSameCached++; StatSkippedParse++; return; }
+            Upsert(JSON.Parse(raw), raw);
         }
 
         public static int StatErrors, StatResync;
@@ -715,7 +808,7 @@ namespace AutonautsCoop
             targetPos.Remove(uid); targetRot.Remove(uid);
         }
 
-        static void Upsert(JSONNode o)
+        static void Upsert(JSONNode o, string raw = null)
         {
             int uid = o["UID"].AsInt;
             Scan.Force(uid);   // re-check it at the next digest
@@ -723,7 +816,7 @@ namespace AutonautsCoop
             if (uid == Teach.EditingUid()) { frozenSkipped = uid; return; }   // the editor UI holds this bot
             var b = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
             bool reselect = Coop.Role == Role.Client && Teach.IsSelected(b);
-            try { UpsertInner(o, uid, b); }
+            try { UpsertInner(o, uid, b, raw); }
             finally { if (reselect && ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) != b) Teach.Reselect(uid); }
         }
 
@@ -750,9 +843,9 @@ namespace AutonautsCoop
             var a = e ? e.GetComponent<Actionable>() : null;
             if (a) { f.m_EngagedObject = a; StatKeptEngaged++; }
         }
-        static void UpsertInner(JSONNode o, int uid, BaseClass b)
+        static void UpsertInner(JSONNode o, int uid, BaseClass b, string raw = null)
         {
-            string want = o.ToString();
+            string want = raw ?? o.ToString();
             // Already exactly what the host has (e.g. everything the host re-sends right after a join): nothing to do.
             // Rebuilding those (blueprints with their building-to-be, bots carrying things) cost ~700 rebuilds and a
             // second-long stall on a big base, and briefly took the joiner's own character away.
@@ -1220,6 +1313,9 @@ namespace AutonautsCoop
                 basePos[kv.Key] = bp;
                 if (SelectHold.Hold(b, bp)) continue;   // whistle screen open: bots stand still (Feel.cs)
                 t.position = walking ? bp + Vector3.up * Anim.Hop(b, Time.realtimeSinceStartup) : bp;
+                // its tile follows (bots' saved tile isn't re-sent on every step any more)
+                var tco = b as TileCoordObject;
+                if (tco) { var tc = new TileCoord(bp); if (tco.m_TileCoord != tc) tco.SetTilePosition(tc); }
                 // my own idle character faces my cursor (local); everyone else faces where the host says
                 var f = b as Farmer;
                 bool mineIdle = kv.Key == MyPlayerUID && f && f.m_State == Farmer.State.None;
@@ -1475,6 +1571,22 @@ namespace AutonautsCoop
             if (Coop.Role != Role.Client || !Coop.I.ClientLoaded) return true;
             if (logged++ < 3) Diag.Log("ignored a mod's storage change on the joiner: " + __originalMethod.Name);
             return false;   // (result stays default: false / 0)
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: a tree's "slow growth" flag (SL) is only read back while the tree is still growing, but the host keeps
+    // it after the tree has grown. Take it as the host has it (it only matters to the host's simulation).
+    [HarmonyLib.HarmonyPatch(typeof(MyTree), nameof(MyTree.Load))]
+    static class P_ClientTreeSlow
+    {
+        static readonly HarmonyLib.AccessTools.FieldRef<MyTree, bool> slow = HarmonyLib.AccessTools.FieldRefAccess<MyTree, bool>("m_Slow");
+        static void Postfix(MyTree __instance, JSONNode Node)
+        {
+            if (Coop.Role != Role.Client || !Sync.Applying) return;
+            slow(__instance) = JSONUtils.GetAsInt(Node, "SL", 0) == 1;
         }
     }
 }

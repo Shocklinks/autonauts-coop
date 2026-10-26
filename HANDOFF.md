@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.12.20 - 2026-10-23 - Created with Claude
+Version 0.12.27 - 2026-10-25 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -150,6 +150,12 @@ Sandbox limits:
 
 ## Open work (priority order)
 
+- Shared sections (Shared.cs): SectionLocks, one editor per section; HostIncoming refuses a push from a non-holder
+  and answers {"srevert"}. Pushes are allowed while nobody holds the section (upload + link in one frame).
+- Host scan (Scan.cs): movers by fingerprint (no tile; full every 8 s, every scan while locked/open); still objects
+  by StaticFp (reflection over a field whitelist) every 4 s, full every 60 s. Stable() strips movers' own TX/TY and
+  workers' "Instruction"; current lines go in "ip" next to "mv".
+- Joiner apply: SplitUp() takes "up" elements as raw text; UpsertRaw skips matches before parsing.
 0. Garbage (GC pauses, ~200 ms each on a big save): host mod garbage ~8 MB/s (mostly re-saving objects to check
    them), joiner apply ~14 MB/s (parsing host JSON and re-serializing each object). Next ideas: per-type cheap
    fingerprints for the background round; apply host JSON without the parse/ToString round trip. The joiner still

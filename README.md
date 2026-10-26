@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.24**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.31**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -68,6 +68,23 @@ Status: **alpha 0.12.24**. Not affiliated with Denki or Curve Games. Contains no
 - Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
+
+## 0.12.25-0.12.31: one editor at a time, faster updates, less garbage
+
+- **Shared editors lock.** The script library, planning areas and bot groups can be edited by one player at a
+  time. Whoever opens one first holds it; anyone else gets a message ("Host is editing the script library") and
+  their editor closes (library, planning) or their changes are put back (bot groups). The host refuses a change
+  from anyone who doesn't hold the lock and sends its copy back.
+- **Changes nobody acts on reach the joiner within seconds** (growth, machine steps): the host takes a cheap look
+  at every still object every 4 s and only saves the ones that changed, plus a full round every 60 s. Fewer saves
+  overall: less garbage on the host.
+- **Bots' current program line** goes out in the small movement stream whenever it changes, instead of waiting for
+  a full re-save of the bot, so an open program highlights the right line. Bots' walking position no longer makes
+  them re-save on every step.
+- **Joiner applies the host's text as sent:** no parse of the whole batch and no re-printing each object, and an
+  object it already matches is skipped before parsing. Joiner apply garbage roughly halved.
+- On the test save: host pauses about every 30 s (was ~27 s; the game alone ~40 s), joiner about every 35 s.
+- Test kit: "play it yourself" (menu 5/6), and the save test reports how many objects lag behind without a flush.
 
 ## 0.12.6-0.12.24: smoother joiner, sync fixes (found with the test kit on a big save)
 

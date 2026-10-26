@@ -267,6 +267,29 @@ namespace AutonautsCoop
             });
             // watch the world for a while, then compare it with the host's
             s.Add(el => { Frame(); return el > WatchSeconds; });
+            // how far behind is the joiner in normal play (no flush first): report only
+            s.Add(el => { TestScript.Chk = null; Req("chknf"); return true; });
+            s.Add(el =>
+            {
+                if (TestScript.Chk == null && el < 30f) return false;
+                if (TestScript.Chk == null) { Info("joiner behind the host", "no reply"); return true; }
+                var host = new Dictionary<int, int>(); var u = TestScript.Chk["u"].AsArray;
+                for (int i = 0; i + 1 < u.Count; i += 2) host[u[i].AsInt] = u[i + 1].AsInt;
+                var mine = TestScript.HashesAtChk(); var types = new Dictionary<string, int>(); int diff = 0;
+                foreach (var kv in host)
+                {
+                    if (mine.TryGetValue(kv.Key, out int h) && h == kv.Value) continue;
+                    diff++;
+                    var b = ObjectTypeList.Instance.GetObjectFromUniqueID(kv.Key, false);
+                    string t = b ? b.m_TypeIdentifier.ToString() : "missing";
+                    types[t] = types.TryGetValue(t, out int c) ? c + 1 : 1;
+                }
+                var parts = new List<string>(); foreach (var kv in types) parts.Add(kv.Key + " " + kv.Value);
+                parts.Sort((x, y) => int.Parse(y.Substring(y.LastIndexOf(' ') + 1)).CompareTo(int.Parse(x.Substring(x.LastIndexOf(' ') + 1))));
+                if (parts.Count > 8) parts.RemoveRange(8, parts.Count - 8);
+                Info("joiner behind the host", diff + " of " + host.Count + " objects differ at a random moment (no flush)" + (diff > 0 ? ": " + string.Join(", ", parts.ToArray()) : ""));
+                return true;
+            });
             s.Add(el => { Info("joiner while watching", Fps() + GcLine()); Info("joiner sync", "rebuilt " + Sync.StatRecreated + ", updated in place " + Sync.StatInPlace + ", received " + (Peer.BytesRecv / 1048576f).ToString("F1") + " MB, apply max " + Sync.StatApplyMaxMs.ToString("F0") + " ms, round trip " + (Coop.I.Client.Host.Rtt * 1000).ToString("F0") + " ms"); TestScript.Chk = null; Req("chk"); return true; });
             s.Add(el =>
             {
