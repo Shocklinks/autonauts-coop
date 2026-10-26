@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.36**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.38**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -35,7 +35,7 @@ Status: **alpha 0.12.36**. Not affiliated with Denki or Curve Games. Contains no
 - Bot groups: joiners create, rename, recolour, nest and delete groups and move bots between them; group Play, Stop,
   Pause, Drop and Call run on the host (Call brings the bots to the joiner who pressed it).
 - "X joined the game" / "X left the game" notices for everyone.
-- Three or more players: tested with the host plus two joiners. Joiners with the same name (e.g. "player" on IP
+- Three or more players: tested with the host plus two joiners (four-player kit test added in 0.12.37). Joiners with the same name (e.g. "player" on IP
   without Steam) get "player (2)" so their stored characters never mix. Set your name in F8 (empty = Steam name).
 - If the host ends the session (quits, goes back to its menu, stops hosting), joiners see "Host has ended the
   lobby." and return to the main menu; if the connection drops it says "(connection lost)".
@@ -68,6 +68,32 @@ Status: **alpha 0.12.36**. Not affiliated with Denki or Curve Games. Contains no
 - Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
+
+## 0.12.38: multiplayer in the game's own menus
+
+- **Pause screen (Esc):** "Host Multiplayer"; while hosting, "Invite Friends" (Steam) and "Stop Hosting (N)" (asks
+  first). They sit on the right of the pause screen, styled like Save/Load/Continue.
+- **Main menu:** "Multiplayer" (between New World and Load World) opens a join panel: host IP, your name, tick to join.
+- **Notices** ("X joined the game", "X is programming this bot", ...) use the game's own popup panel at the top of the
+  screen; "The host paused the game" stays up while it lasts.
+- **"Host has ended the lobby."** is the game's own message box with an OK button.
+- F8 keeps the co-op window for port, name, status and the bug report. The old bottom-left status line is gone.
+- Test kit: `mode=ui` clicks through all of it and saves screenshots in the results folder.
+
+## 0.12.37: fewer joiner rebuilds, fresher world, four-player test
+
+- **Machines mid-job update in place on the joiner.** Reloading a working converter (workbench, blueprint being
+  built) ran the game's "job finished" code on the joiner's copy: its ingredients vanished and it was rebuilt. They
+  now reload from idle, like a fresh copy.
+- **Blueprints that just finished a stage** no longer get rebuilt right before they turn into the building.
+- **Bots that swapped one carried item for another** (put a stick in a bench, picked up the next) are updated in
+  place; so are birds that left their tree.
+- **Changes nobody acts on reach joiners sooner:** the host's cheap look at still objects runs every 2 s (was 4 s),
+  hut folk changing what they do and bots swapping items count as changes.
+- Fixed: 3 errors in the joiner's log at every quit from a world with huts.
+- Diagnostics: the test kit's world checks no longer count as host hitches (one made the host's "worst frame"
+  472 ms on BRAVO); the log says why a building could not be updated in place.
+- Test kit: **four-player test** (host + 3 joiners, each a real game): `mode=four`, or `mode=four` + `save=<name>`.
 
 ## 0.12.36: script library merges, fewer rebuilds, smaller join hitch
 
@@ -224,10 +250,10 @@ within seconds. Fixed:
 
 ## Connecting
 
-- **Steam (recommended):** host loads a world, F8 > Host this world. The Steam invite dialog opens. Friends accept the
+- **Steam (recommended):** host loads a world, Esc > Host Multiplayer. The Steam invite dialog opens. Friends accept the
   invite, or right-click the host in their friends list > Join Game. No IPs, no port forwarding (Valve relay).
   Friends-only lobby, up to 8 players. Every player needs their own copy of Autonauts.
-- **IP:** host forwards TCP 27015 (or use a virtual LAN). Joiner: main menu, F8, type the IP, Join.
+- **IP:** host forwards TCP 27015 (or use a virtual LAN). Joiner: main menu > Multiplayer, type the IP, join.
 
 The Steam path uses the game's own Steamworks.NET (15.0.1, SDK 1.51) and app id, ISteamNetworkingMessages (reliable,
 channel 0), 60000-byte pieces with a 1-byte header, a 1 s keep-alive and a 60 s timeout. The test suite runs the same
@@ -237,7 +263,7 @@ framing/peer code over a UDP stand-in (`COOP_TRANSPORT=udp`); only lobbies and i
 
 1. Install [BepInEx 5.4.23.5 win x64](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5) into the game folder.
 2. Put `AutonautsCoop.dll` in `BepInEx\plugins`.
-3. Host: load a world, F8 -> Host this world. Joiner: main menu, F8 -> IP -> Join.
+3. Host: load a world, Esc -> Host Multiplayer. Joiner: accept the Steam invite, or main menu -> Multiplayer -> IP -> join.
 
 ## Continuing development
 

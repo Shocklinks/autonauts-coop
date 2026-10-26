@@ -177,16 +177,24 @@ namespace AutonautsCoop
         static int lastSelectTarget = -2; static GameStateManager.State lastState = GameStateManager.State.Total;
         static long bytesIn0, bytesOut0; static int moverSaves0, moverSkips0; static int batches0, recreated0, inplace0; static double apply0;
 
+        /// Test checks (whole-world checksums) cost a few hundred ms on a big save; they are not part of play, so the
+        /// frame they ran in and the next (Unity reports a frame's time one frame later) are left out of the worst-frame
+        /// and fps figures. 0.12.36's "host worst 472 ms" on BRAVO was one of these.
+        static int testWorkFrame = -10; public static int TestWorkFrames;
+        public static void TestWork() { if (testWorkFrame != Time.frameCount) TestWorkFrames++; testWorkFrame = Time.frameCount; }
+        public static bool InTestWork() => Time.frameCount - testWorkFrame <= 1;
+
         public static void Tick()
         {
             float dt = Time.unscaledDeltaTime;
             AllocProf.FrameStart();
-            frames++; frameSum += dt; if (dt > frameMax) frameMax = dt;
+            bool test = InTestWork();
+            if (!test) { frames++; frameSum += dt; if (dt > frameMax) frameMax = dt; }
             // garbage collection pauses: a frame in which the collector ran
             int gcNow = GC.CollectionCount(0);
             long mem = Prof.Mem;
-            if (gcNow != gcLast) { gcs += gcNow - gcLast; GcTotal += gcNow - gcLast; gcLast = gcNow; if (dt > gcWorst) gcWorst = dt; if (dt > GcWorstEver) GcWorstEver = dt; }
-            else { if (dt > plainWorst) plainWorst = dt; if (mem > memLast) { frameAlloc += mem - memLast; AllocTotal += mem - memLast; } }
+            if (gcNow != gcLast) { gcs += gcNow - gcLast; GcTotal += gcNow - gcLast; gcLast = gcNow; if (!test && dt > gcWorst) gcWorst = dt; if (!test && dt > GcWorstEver) GcWorstEver = dt; }
+            else { if (!test && dt > plainWorst) plainWorst = dt; if (mem > memLast) { frameAlloc += mem - memLast; AllocTotal += mem - memLast; } }
             memLast = mem;
             if (Coop.Role == Role.Off) { nextSummary = 0; return; }
             if (!On) return;

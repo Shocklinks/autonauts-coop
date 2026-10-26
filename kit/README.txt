@@ -1,5 +1,5 @@
 AutonautsCoop test kit
-Version 0.12.25 - 2026-10-23 - Created with Claude
+Version 0.12.37 - 2026-10-26 - Created with Claude
 
 What it does
   Runs two copies of Autonauts on this PC, a host and a joiner. The mod's built-in test bots play both
@@ -7,7 +7,7 @@ What it does
 
 What it doesn't touch
   - Your Steam install: only read. The kit plays from its own copies in
-    %LOCALAPPDATA%\AutonautsCoopTest (about 2 GB for the two copies).
+    %LOCALAPPDATA%\AutonautsCoopTest (about 2 GB for the two copies; 4 GB once the four-player test has run).
   - Your saves: only read. When you test one of your saves, the kit copies it and plays the copy.
   - Steam: the copies don't start Steam (no achievements, stats or playtime). They connect over 127.0.0.1.
 
@@ -32,13 +32,16 @@ Options (from a command prompt in this folder)
   RunTests.bat -Mode save -Save "My base" -Lag 150 -Jitter 50
   RunTests.bat -Mode full -Work D:\AutonautsCoopTest      (put the game copies on another drive)
   RunTests.bat -Mode save -WatchSeconds 600               (watch your save for 10 minutes)
+  RunTests.bat -Mode four                                 (host + 3 joiners, new world: four game copies)
+  RunTests.bat -Mode ui                                   (in-game multiplayer buttons; screenshots in the results)
+  RunTests.bat -Mode four -Save "My base"                 (host + 3 joiners on your save; about 4 GB RAM per copy)
 
 Running tests without anyone at the PC (watcher)
   1. Double-click Watch.bat and leave its window open (or run WatchAtLogin.bat once so it starts when you log in;
      "WatchAtLogin.bat remove" undoes that).
   2. Claude drops a request file into kit\requests\ (for example mode=save, save=BRAVO). The watcher runs the kit
      for it and writes <name>.done with where the results are.
-  3. The watcher only ever runs this test kit, with only these settings: mode (full/save), save (must be one of your
+  3. The watcher only ever runs this test kit, with only these settings: mode (full/save/four/ui), save (must be one of your
      saves), lag, jitter, minutes, watch. Close its window to stop it.
   The PC must stay logged in (locking the screen is fine; signing out or sleep stops it).
   4. A request with "action=shutdown" shuts the PC down after the requests before it (60 s warning; cancel with

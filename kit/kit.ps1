@@ -1,13 +1,14 @@
 # AutonautsCoop test kit - kit.ps1
-# Version 0.12.32 - 2026-10-26 - Created with Claude
+# Version 0.12.37 - 2026-10-26 - Created with Claude
 #
-# Runs two copies of Autonauts on this PC (a host and a joiner), both driven by the mod's built-in test bots,
+# Runs two copies of Autonauts on this PC (a host and a joiner), both driven by the mod's built-in test bots
+# (mode four: a host and three joiners, four copies),
 # and collects the results in kit\results\<date>-<mode>\.
 #   - Your Steam install is only read, never changed. The kit plays from its own copies (in -Work).
 #   - Your saves are only read. A save you pick is copied; the test plays the copy.
 #   - Steam is not started by the copies (no achievements, stats or playtime); they connect over 127.0.0.1.
 # Usually started from RunTests.bat (menu). Direct use:
-#   kit.ps1 -Mode full|save|play [-Save "<save name>"] [-Lag 150] [-Jitter 50] [-Game <dir>] [-Work <dir>] [-Minutes 45]
+#   kit.ps1 -Mode full|save|play|four|ui [-Save "<save name>"] [-Lag 150] [-Jitter 50] [-Game <dir>] [-Work <dir>] [-Minutes 45]
 param(
     [string]$Mode = "",
     [string]$Save = "",
@@ -82,7 +83,10 @@ if (-not $Mode) {
     Say "  4) Your save with internet-like lag"
     Say "  5) Play it yourself: host and joiner windows, no test bots (you control both)"
     Say "  6) Play it yourself with internet-like lag"
-    $choice = Read-Host "Choose 1-6"
+    Say "  7) Four players: host + 3 joiners, new world (four game windows, about 15 min)"
+    Say "  8) Four players on your save"
+    Say "  9) In-game multiplayer buttons (menus, join panel, notices; takes screenshots)"
+    $choice = Read-Host "Choose 1-9"
     switch ($choice) {
         "1" { $Mode = "full" }
         "2" { $Mode = "full"; $Lag = 150; $Jitter = 50 }
@@ -90,7 +94,10 @@ if (-not $Mode) {
         "4" { $Mode = "save"; $Lag = 150; $Jitter = 50 }
         "5" { $Mode = "play" }
         "6" { $Mode = "play"; $Lag = 150; $Jitter = 50 }
-        default { Fail "Choose 1 to 6." }
+        "7" { $Mode = "four" }
+        "8" { $Mode = "four"; $Save = Pick-Save }
+        "9" { $Mode = "ui" }
+        default { Fail "Choose 1 to 9." }
     }
 }
 if ($Mode -eq "play" -and -not $Save) {
@@ -99,21 +106,26 @@ if ($Mode -eq "play" -and -not $Save) {
 }
 if ($Mode -eq "save" -and -not $Save) { $Save = Pick-Save }
 if ($Mode -eq "save" -and -not (Test-Path (Join-Path $SavesRoot $Save))) { Fail "Save not found: $Save" }
+if ($Mode -eq "four" -and $Save -and -not (Test-Path (Join-Path $SavesRoot $Save))) { Fail "Save not found: $Save" }
+# the copies of the game this mode runs (each its own folder, logs and save folder)
+$Roles = if ($Mode -eq "four") { @("host", "client1", "client2", "client3") } else { @("host", "client") }
+$Joiners = @($Roles | Where-Object { $_ -ne "host" })
 
 # ---------------- space ----------------
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 $gameMB = [Math]::Round(((Get-ChildItem $Game -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum / 1MB), 0)
 $drive = (Get-Item $Work).PSDrive
 $freeMB = [Math]::Round($drive.Free / 1MB, 0)
-$haveMB = 0; if (Test-Path (Join-Path $Work "host\Autonauts.exe")) { $haveMB = $gameMB * 2 }
-if ($freeMB + $haveMB -lt $gameMB * 2 + 1500) { Fail "Need about $([Math]::Round(($gameMB * 2 + 1500) / 1024, 1)) GB free on $($drive.Name): for the two game copies (have $([Math]::Round($freeMB / 1024, 1)) GB). Use -Work <folder> on another drive." }
+$nc = $Roles.Count
+$haveMB = 0; foreach ($r in $Roles) { if (Test-Path (Join-Path $Work "$r\Autonauts.exe")) { $haveMB += $gameMB } }
+if ($freeMB + $haveMB -lt $gameMB * $nc + 1500) { Fail "Need about $([Math]::Round(($gameMB * $nc + 1500) / 1024, 1)) GB free on $($drive.Name): for the $nc game copies (have $([Math]::Round($freeMB / 1024, 1)) GB). Use -Work <folder> on another drive." }
 $ramGB = [Math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
-if ($ramGB -lt 8) { Say "Warning: $ramGB GB RAM. Two copies of the game need about 6-8 GB." Yellow }
+if ($ramGB -lt 4 * $nc) { Say "Warning: $ramGB GB RAM. $nc copies of the game need about $(3 * $nc)-$(4 * $nc) GB." Yellow }
 
 # ---------------- copies ----------------
 Say ""
 Say "Game:  $Game" White
-Say "Copies: $Work (first run copies about $([Math]::Round($gameMB / 1024, 1)) GB twice; later runs only update)" White
+Say "Copies: $Work (first run copies about $([Math]::Round($gameMB / 1024, 1)) GB $nc times; later runs only update)" White
 foreach ($p in Get-Process -Name "Autonauts" -ErrorAction SilentlyContinue) {
     if ($p.Path -and $p.Path.StartsWith($Work, [StringComparison]::OrdinalIgnoreCase)) { Stop-Process -Id $p.Id -Force }
 }
@@ -122,7 +134,7 @@ if (-not (Test-Path (Join-Path $modDir "BepInEx\plugins\AutonautsCoop.dll"))) {
     if (Test-Path $modDir) { Remove-Item $modDir -Recurse -Force }
     Expand-Archive -Path $zip.FullName -DestinationPath $modDir -Force
 }
-foreach ($r in @("host", "client")) {
+foreach ($r in $Roles) {
     $d = Join-Path $Work $r
     Say "  copying the game for the $r..."
     & robocopy $Game $d /MIR /XD BepInEx /XF winhttp.dll doorstop_config.ini .doorstop_version changelog.txt steam_appid.txt /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
@@ -135,8 +147,9 @@ foreach ($r in @("host", "client")) {
     if (Test-Path $data) { Remove-Item $data -Recurse -Force }
     New-Item -ItemType Directory -Force -Path (Join-Path $data "Saves") | Out-Null
     Remove-Item (Join-Path $d "player.log") -ErrorAction SilentlyContinue
+    Get-ChildItem -Path (Join-Path $d "BepInEx") -Filter "coop_ui_*.png" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
-if ($Save -and ($Mode -eq "save" -or $Mode -eq "play")) {
+if ($Save -and ($Mode -eq "save" -or $Mode -eq "play" -or $Mode -eq "four")) {
     Say "  copying your save `"$Save`"..."
     & robocopy (Join-Path $SavesRoot $Save) (Join-Path $Work "data_host\Saves\$Save") /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { Fail "Copying the save failed (robocopy $LASTEXITCODE)" }
@@ -145,7 +158,7 @@ if ($Save -and ($Mode -eq "save" -or $Mode -eq "play")) {
 # ---------------- collect (also during the run) ----------------
 function Collect {
     New-Item -ItemType Directory -Force -Path $out | Out-Null
-    foreach ($r in @("host", "client")) {
+    foreach ($r in $Roles) {
         $b = Join-Path $Work "$r\BepInEx"
         foreach ($f in @("coop_test_$r.txt", "coop.log", "coop_diag.log", "LogOutput.log")) {
             $src = Join-Path $b $f
@@ -153,6 +166,7 @@ function Collect {
         }
         $pl = Join-Path $Work "$r\player.log"
         if (Test-Path $pl) { try { Copy-Item $pl (Join-Path $out "$r-player.log") -Force } catch {} }
+        foreach ($png in @(Get-ChildItem -Path $b -Filter "coop_ui_*.png" -ErrorAction SilentlyContinue)) { try { Copy-Item $png.FullName (Join-Path $out $png.Name) -Force } catch {} }
     }
 }
 
@@ -161,7 +175,7 @@ function Cut([string]$s, [int]$n) { if ($s.Length -le $n) { return $s } return $
 function Write-Digest([string]$dir, $summary) {
     $d = New-Object System.Collections.Generic.List[string]
     foreach ($l in $summary) { if ($l -ne "") { $d.Add($l) } }
-    foreach ($r in @("host", "client")) {
+    foreach ($r in $Roles) {
         $d.Add(""); $d.Add("== $r")
         $pl = Join-Path $dir "$r-player.log"
         if (Test-Path $pl) {
@@ -186,7 +200,7 @@ function Write-Digest([string]$dir, $summary) {
         if (Test-Path $dl) {
             $stats = @(Select-String -Path $dl -Pattern ' stats 10s: ' -SimpleMatch)
             foreach ($st in ($stats | Select-Object -Last 2)) { $d.Add("  " + (Cut ($st.Line -replace '^.*stats 10s: ', 'stats: ') 700)) }
-            if ($r -eq "client") {
+            if ($r -ne "host") {
                 $rb = @(Select-String -Path $dl -Pattern ' rebuilt (\S+?)#' | ForEach-Object { $_.Matches[0].Groups[1].Value })
                 $d.Add("rebuilds (could not update in place): $($rb.Count)")
                 foreach ($g in ($rb | Group-Object | Sort-Object Count -Descending | Select-Object -First 8)) { $d.Add("  $($g.Count)x $($g.Name)") }
@@ -218,6 +232,9 @@ function Write-Digest([string]$dir, $summary) {
 function Start-Role([string]$r) {
     if ($Mode -eq "play") { Remove-Item Env:COOP_TEST -ErrorAction SilentlyContinue; $env:COOP_NAME = $(if ($r -eq "host") { "Host" } else { "Joiner" }) }
     else { $env:COOP_TEST = $r; Remove-Item Env:COOP_NAME -ErrorAction SilentlyContinue }
+    if ($Mode -eq "four") { $env:COOP_FOUR = "1"; $env:COOP_FOUR_SAVE = $Save; $env:COOP_LOWTEX = "1" }
+    else { Remove-Item Env:COOP_FOUR, Env:COOP_FOUR_SAVE, Env:COOP_LOWTEX -ErrorAction SilentlyContinue }
+    if ($Mode -eq "ui") { $env:COOP_UITEST = "1" } else { Remove-Item Env:COOP_UITEST -ErrorAction SilentlyContinue }
     $env:COOP_DATA = Join-Path $Work "data_$r"
     $env:COOP_NOSTEAM = "1"; $env:COOP_BIND = "127.0.0.1"; $env:COOP_IP = "127.0.0.1"; $env:COOP_PORT = "$Port"
     $env:COOP_LAG = "$Lag"; $env:COOP_JITTER = "$Jitter"
@@ -230,13 +247,14 @@ function Start-Role([string]$r) {
         -ArgumentList @("-screen-fullscreen", "0", "-screen-width", "1280", "-screen-height", "720", "-logFile", "`"$log`"")
 }
 
-$label = $Mode + $(if ($Lag -gt 0 -or $Jitter -gt 0) { "-lag$Lag" } else { "" })
+$label = $Mode + $(if ($Mode -eq "four" -and $Save) { "-save" } else { "" }) + $(if ($Lag -gt 0 -or $Jitter -gt 0) { "-lag$Lag" } else { "" })
 if ($GcDivisor -gt 0) { $label += "-gc$GcDivisor" }
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $out = Join-Path $Kit "results\$stamp-$label"
-$resHost = Join-Path $Work "host\BepInEx\coop_test_host.txt"
-$resClient = Join-Path $Work "client\BepInEx\coop_test_client.txt"
-Remove-Item $resHost, $resClient -ErrorAction SilentlyContinue
+$resFiles = @($Roles | ForEach-Object { Join-Path $Work "$_\BepInEx\coop_test_$_.txt" })
+$resJoiners = @($Joiners | ForEach-Object { Join-Path $Work "$_\BepInEx\coop_test_$_.txt" })
+Remove-Item $resFiles -ErrorAction SilentlyContinue
+function All-Done { foreach ($f in $resJoiners) { if (-not ((Test-Path $f) -and (Select-String -Path $f -Pattern "^DONE" -Quiet))) { return $false } } return $true }
 
 if ($Mode -eq "play") {
     Say ""
@@ -272,20 +290,19 @@ if ($Mode -eq "play") {
 }
 
 Say ""
-Say "Starting the host and the joiner ($label). Two game windows open." White
+Say "Starting the host and $($Joiners.Count) joiner(s) ($label). $($Roles.Count) game windows open." White
 Say "Leave them alone (don't click into them or minimize them). Close this window to stop." White
 $started = Get-Date
-$ph = $null; $pc = $null
+$procs = @()
 try {
-    $ph = Start-Role "host"
-    Start-Sleep -Seconds 5
-    $pc = Start-Role "client"
+    $procs += Start-Role "host"
+    foreach ($j in $Joiners) { Start-Sleep -Seconds $(if ($Joiners.Count -gt 1) { 3 } else { 5 }); $procs += Start-Role $j }
     $lastShown = ""; $tick = 0
     $deadline = (Get-Date).AddMinutes($Minutes)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 5
         $lines = @()
-        foreach ($f in @($resHost, $resClient)) { if (Test-Path $f) { $lines += @(Get-Content $f) } }
+        foreach ($f in $resFiles) { if (Test-Path $f) { $lines += @(Get-Content $f) } }
         $pass = @($lines | Where-Object { $_ -like "PASS*" }).Count
         $fail = @($lines | Where-Object { $_ -like "FAIL*" }).Count
         $last = $lines | Select-Object -Last 1
@@ -298,30 +315,30 @@ try {
         if (Test-Path $cancel) { Remove-Item $cancel -Force -ErrorAction SilentlyContinue; Say ""; Say "Cancelled." Yellow; break }
         if ($tick % 6 -eq 3) {
             $broken = $false
-            foreach ($r in @("host", "client")) { $pl = Join-Path $Work "$r\player.log"; if ((Test-Path $pl) -and (Select-String -Path $pl -Pattern "HarmonyException" -SimpleMatch -Quiet)) { $broken = $true } }
+            foreach ($r in $Roles) { $pl = Join-Path $Work "$r\player.log"; if ((Test-Path $pl) -and (Select-String -Path $pl -Pattern "HarmonyException" -SimpleMatch -Quiet)) { $broken = $true } }
             if ($broken) { Say ""; Say "The mod failed to load (HarmonyException in player.log): stopping." Red; break }
         }
-        if ((Test-Path $resClient) -and (Select-String -Path $resClient -Pattern "^DONE" -Quiet)) { Start-Sleep -Seconds 5; break }
-        if ($ph.HasExited -and $pc.HasExited) { Say ""; Say "Both games closed." Yellow; break }
+        if (All-Done) { Start-Sleep -Seconds 5; break }
+        if (@($procs | Where-Object { -not $_.HasExited }).Count -eq 0) { Say ""; Say "All games closed." Yellow; break }
     }
     Say ""
 }
 finally {
-    foreach ($p in @($ph, $pc)) { if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force } catch {} } }
+    foreach ($p in $procs) { if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force } catch {} } }
 }
 
 Collect
 $all = @()
-foreach ($f in @($resHost, $resClient)) { if (Test-Path $f) { $all += @(Get-Content $f) } }
+foreach ($f in $resFiles) { if (Test-Path $f) { $all += @(Get-Content $f) } }
 $pass = @($all | Where-Object { $_ -like "PASS*" }).Count
 $fail = @($all | Where-Object { $_ -like "FAIL*" }).Count
-$done = (Test-Path $resClient) -and (Select-String -Path $resClient -Pattern "^DONE" -Quiet)
+$done = All-Done
 $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
 $gpu = (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name
 $summary = @(
     "AutonautsCoop test kit - $label - $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
     "Mod $ver   Game $Game",
-    $(if ($Mode -eq "save") { "Save: $Save" } else { "New world" }),
+    ($(if ($Save -and $Mode -ne "full") { "Save: $Save" } else { "New world" }) + $(if ($Mode -eq "four") { " - four players (host + 3 joiners)" } else { "" })),
     "Lag: $Lag ms + $Jitter ms jitter each way",
     $(if ($GcDivisor -gt 0) { "GC_FREE_SPACE_DIVISOR=$GcDivisor" } else { "GC: default" }),
     "PC: $cpu, $ramGB GB RAM, $gpu",

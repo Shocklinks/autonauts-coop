@@ -5,7 +5,7 @@ set -e
 GAME="$1"; BEP="$2"; OUT="$3"; M="$GAME/Autonauts_Data/Managed"
 mkdir -p "$OUT"
 REFS=""
-for f in mscorlib System System.Core netstandard UnityEngine UnityEngine.CoreModule UnityEngine.IMGUIModule UnityEngine.TextRenderingModule UnityEngine.InputModule UnityEngine.PhysicsModule UnityEngine.UI UnityEngine.AnimationModule Assembly-CSharp Assembly-CSharp-firstpass; do
+for f in mscorlib System System.Core netstandard UnityEngine UnityEngine.CoreModule UnityEngine.IMGUIModule UnityEngine.TextRenderingModule UnityEngine.InputModule UnityEngine.PhysicsModule UnityEngine.UI UnityEngine.AnimationModule UnityEngine.ScreenCaptureModule UnityEngine.UIModule Assembly-CSharp Assembly-CSharp-firstpass; do
   [ -f "$M/$f.dll" ] && REFS="$REFS -r:$M/$f.dll"
 done
 REFS="$REFS -r:$BEP/BepInEx/core/BepInEx.dll -r:$BEP/BepInEx/core/0Harmony.dll"

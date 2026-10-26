@@ -1,6 +1,6 @@
 # HANDOFF: how to continue this project (for the next Claude session)
 
-Version 0.12.32 - 2026-10-26 - Created with Claude
+Version 0.12.38 - 2026-10-26 - Created with Claude
 
 Read this first. The owner (GitHub: Shocklinks) is not familiar with GitHub: do the Git and GitHub work yourself,
 explain results in short, plain sentences, and ask before anything public (releases, hub PR changes).
@@ -64,11 +64,14 @@ Commit as `Shocklinks <Shocklinks@users.noreply.github.com>`. Never use a real n
 | Persist.cs | Seats + stored ("parked") joiner characters in the host save; restore on rejoin |
 | VersionCheck.cs | Refuse a joiner on a different mod/game version, with a reason |
 | Extras.cs | Joiner autosave/quicksave block; bug report zip |
-| Menu.cs | F8 window, toasts, "Host has ended the lobby." dialog |
+| Menu.cs | F8 window (settings, status, bug report); Menu.Toast -> NativeUI.Notify (plain box only without a HUD) |
+| NativeUI.cs | Game-native UI: pause-screen Host/Invite/Stop buttons, main-menu Multiplayer button + join panel (RenameSign prefab), notices (WarningRollover prefab), ended box (GameStateConfirm) |
+| NativeUITest.cs | UI test (COOP_UITEST=1, kit mode=ui): clicks through the buttons, screenshots BepInEx\coop_ui_*.png |
 | Feel.cs | Joiner feel: real frame time for UI/camera (the sim clock is frozen), look-at-own-cursor, animators, buffered movement interpolation, whistle bot picking (bots held still, drawn bot under cursor) |
 | Diag.cs | Diagnostics log `coop_diag.log` (clicks, actions and host outcomes, screens, 10 s stats, RTT via Msg.Echo, F7 mark); fake mouse for tests |
 | Kit.cs, Soak.cs | Windows test kit support: save dir redirect, no Steam, bind address; scenario on an existing save |
 | TestBot.cs, TestScript.cs, BigBase.cs, Multi.cs | Automated QA scenario (host/client bots), big-base stress test, three-player test |
+| Four.cs | Four-player test: host + 3 game joiners (COOP_FOUR=1, COOP_TEST=client1..3, optional COOP_FOUR_SAVE); kit `mode=four` |
 | kit/ | Windows test kit: RunTests.bat + kit.ps1 (two copies on the owner's PC, full/lag/own-save tests, results in kit\results) |
 | test/protobot.py | A joiner that speaks the TCP protocol without the game (third player in COOP_MULTI; three game instances don't fit in sandbox memory) |
 
@@ -101,7 +104,9 @@ Running the tests:
 - Don't edit `src/` while a run is about to start its build.
 - Results are in `<work>/{host,client}/BepInEx/coop_test_*.txt` and `coop.log`.
 
-**Last results (0.12.1):** 112/112 TCP, 95/95 UDP, 113/113 TCP with 150+50 ms simulated lag and the kit switches, 11/11+5/5 own-save (soak) scenario, 15/15 three-player (0.11), 7/7 big-base.
+**Last kit results (0.12.36d, owner's PC):** full 116/116, BRAVO save 18/18 (7 joiner rebuilds). 0.12.37 not yet run;
+four-player test not yet run.
+**Last cloud results (0.12.1):** 112/112 TCP, 95/95 UDP, 113/113 TCP with 150+50 ms simulated lag and the kit switches, 11/11+5/5 own-save (soak) scenario, 15/15 three-player (0.11), 7/7 big-base.
 
 Sandbox limits:
 - Two medium-map game instances (about 3 GB each) get OOM-killed, so the big test uses a small map.
@@ -165,6 +170,10 @@ Sandbox limits:
 - Scan hot objects (changed in the last 3 s): re-saved only when StaticFp changes or once a second.
 - Join snapshot (Coop.SendSnapshot): flush without Scan.Full, capture on the main thread, gzip on a thread;
   Peer.Hold + Peer.Deferred keep the broadcasts made meanwhile and send them right after the snapshot.
+- Joiner in-place reloads (0.12.37): converters are put back to Idle before Load (Sync.QuietIdle; a Converting ->
+  Converting SetState ran EndConverting on the copy: ingredients destroyed, stage counted, mod callback fired).
+  Blueprint Stage is set after Load (the game caps it at stages-1). Carry lists drop items no longer under the farmer.
+  Sync.No() logs why a building fell back to a rebuild. Diag.TestWork() keeps test checksums out of frame stats.
 - Joiner: P_ClientNoModWorldWrites blocks world-changing Mod* calls; LateCheck re-saves unverified in-place updates
   1.5 s later.
 0. Garbage (GC pauses, ~200 ms each on a big save): host mod garbage ~8 MB/s (mostly re-saving objects to check
@@ -174,6 +183,15 @@ Sandbox limits:
    Workshop (Lua) mods run on the joiner too: ModStorage writes are blocked there (0.12.24); other mod APIs that
    change the world (spawn objects, move bots) may still act locally (the digest removes extras).
 
+0a. Native UI notes (0.12.38): layouts were checked from kit screenshots at 1280x720 (pause buttons in the free strip
+   right of the Planet Scan panel; other aspect ratios not checked). "Invite Friends" needs Steam, so the kit (no
+   Steam) never shows it. Bot lock labels ("Being programmed by NAME", Locks.OnGUI) are still IMGUI. Starting a new
+   world ~2 s after the title screen appears fails in world generation (map preview in progress): tests start at once.
+0b. Joiner hitch (noted 0.12.37, not yet investigated): ~200 ms frame about every 100 s on BRAVO ("apply max ~190-211 ms"
+   in the joiner's 10 s stats; also in 0.12.36). Not a GC frame. Likely one large batch (periodic full round/digest).
+0c. Rejoin duplicate-UID bug (0.12.37, BRAVO four-player run): right after a rejoin snapshot, a converter update whose
+   ingredient was just taken from a bot hit "same key" in Plot.AddObject; the ingredient got a local UID (1e9+), the
+   building was rebuilt, the extra removed by the digest ~3 s later. Self-heals; root cause open.
 1. A real Steam session between two PCs. Collect the F8 bug report zip from both sides.
 2. Real medium/large late-game saves: join time, host frame cost.
 3. Three or more real game clients at once (tested: host + one game joiner + the protocol bot).

@@ -24,7 +24,7 @@ namespace AutonautsCoop
 
         // frame stats over a window
         static readonly List<float> frames = new List<float>();
-        static void Frame() { frames.Add(Time.unscaledDeltaTime); }
+        static void Frame() { if (!Diag.InTestWork()) frames.Add(Time.unscaledDeltaTime); }
         static int gc0; static long alloc0; static float aloneStart;
         /// Collections since the mark, the worst frame one landed in, and the garbage rate (all code, not just the mod).
         static string GcLine()
@@ -58,28 +58,34 @@ namespace AutonautsCoop
             return false;
         }
 
-        public static void BuildHost(List<TestBot.IEnumeratorStep> s)
+        /// Load a save from the main menu through the game's own Load screen (also used by the four-player test).
+        public static void AddLoadSave(List<TestBot.IEnumeratorStep> s, string name)
         {
-            s.Add(el => TestBot.AtMainMenu() && el > 8f);
             s.Add(el =>
             {
                 SaveLoadManager.m_MiniMap = false; SaveLoadManager.m_SpecificFile = false;
-                TestBot.Assert("host: the save to test exists (" + SaveName + ")", SaveFileWorldData.Exists(MyFile.GetBasePath(false) + SaveName), MyFile.GetBasePath(false) + SaveName);
+                TestBot.Assert("host: the save to test exists (" + name + ")", SaveFileWorldData.Exists(MyFile.GetBasePath(false) + name), MyFile.GetBasePath(false) + name);
                 // the main menu's Load screen, picking the save (quick load): the game's own load path
-                int bad = SaveLoadManager.Instance.CheckValidFile(SaveName);
+                int bad = SaveLoadManager.Instance.CheckValidFile(name);
                 if (bad != 0) { TestBot.Assert("host: the game accepts the save", false, "CheckValidFile " + bad); return true; }
                 // the game sets up its recipe tables for the save's game mode when it enters the world; loading right after
                 // boot (no world played yet) can reach the buildings first, so set them up now
-                var sf = new SaveFile(); sf.LoadPreview(SaveName);
+                var sf = new SaveFile(); sf.LoadPreview(name);
                 GameOptionsManager.Instance.m_Options.m_GameMode = sf.m_Summary.m_GameOptions.m_GameMode;
                 VariableManager.Instance.ReInit();
                 GameStateManager.Instance.PushState(GameStateManager.State.Load);
                 var gl = GameStateManager.Instance.GetCurrentState().GetComponent<GameStateLoad>();
                 gl.Init(false);
-                gl.SaveFilePreviewSelected(SaveName, true);
+                gl.SaveFilePreviewSelected(name, true);
                 loadStart = Time.realtimeSinceStartup;
                 return true;
             });
+        }
+
+        public static void BuildHost(List<TestBot.IEnumeratorStep> s)
+        {
+            s.Add(el => TestBot.AtMainMenu() && el > 8f);
+            AddLoadSave(s, SaveName);
             s.Add(el => Coop.InGame() && GameStateManager.Instance.GetActualState() == GameStateManager.State.Normal && el > 5f);
             s.Add(el =>
             {

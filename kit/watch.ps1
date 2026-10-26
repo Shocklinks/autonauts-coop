@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - watch.ps1 (started by Watch.bat)
-# Version 0.12.32 - 2026-10-26 - Created with Claude
+# Version 0.12.37 - 2026-10-26 - Created with Claude
 #
 # Waits for test requests and runs the kit for each one, so tests can be started without anyone at the PC.
 #   - A request is a small text file in kit\requests\ named <anything>.req, for example:
@@ -7,6 +7,8 @@
 #         save=BRAVO
 #         lag=0
 #         jitter=0
+#   - "mode=ui" tests the in-game multiplayer buttons and saves screenshots in the results folder.
+#   - "mode=four" runs the four-player test (host + 3 joiners); add "save=<name>" to run it on a save.
 #   - Only these settings are read, and only the test kit is ever run. Anything else in the file is ignored.
 #   - While a request runs it is renamed .running; when done, <name>.done says where the results are and the
 #     kit's console output is in <name>.log.
@@ -38,7 +40,7 @@ function Read-Request([string]$path) {
         if ($line -notmatch '^\s*([a-z]+)\s*=\s*(.*?)\s*$') { continue }
         $k = $Matches[1]; $v = $Matches[2]
         switch ($k) {
-            "mode"    { if ($v -in @("full", "save")) { $r.mode = $v } }
+            "mode"    { if ($v -in @("full", "save", "four", "ui")) { $r.mode = $v } }
             "action"  { if ($v -in @("shutdown", "cleanzips")) { $r.action = $v } }
             "gc"      { $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 9) { $r.gc = $n } }
             "save"    { $r.save = $v }
@@ -97,8 +99,8 @@ while ($true) {
         continue
     }
     $problem = $null
-    if (-not $r.mode) { $problem = "mode must be full or save" }
-    elseif ($r.mode -eq "save") {
+    if (-not $r.mode) { $problem = "mode must be full, save, four or ui" }
+    elseif ($r.mode -eq "save" -or ($r.mode -eq "four" -and $r.save)) {
         $names = @(Get-ChildItem -Path $SavesRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
         if ($names -notcontains $r.save) { $problem = "no save named '$($r.save)'" }
     }
@@ -109,12 +111,12 @@ while ($true) {
         continue
     }
 
-    $desc = "$($r.mode)" + $(if ($r.mode -eq "save") { " '$($r.save)'" } else { "" }) + " lag $($r.lag)+$($r.jitter)"
+    $desc = "$($r.mode)" + $(if ($r.save -and $r.mode -ne "full") { " '$($r.save)'" } else { "" }) + " lag $($r.lag)+$($r.jitter)"
     Write-Host ("{0}  {1}: running {2}" -f (Get-Date -Format "HH:mm"), $name, $desc) -ForegroundColor Cyan
     Set-Status "running $name ($desc)"
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $Kit "kit.ps1"), "-Mode", $r.mode,
               "-Lag", "$($r.lag)", "-Jitter", "$($r.jitter)", "-Minutes", "$($r.minutes)", "-WatchSeconds", "$($r.watch)", "-GcDivisor", "$($r.gc)")
-    if ($r.mode -eq "save") { $argList += @("-Save", $r.save) }
+    if ($r.save -and $r.mode -ne "full") { $argList += @("-Save", $r.save) }
     $latestFile = Join-Path $Kit "results\latest.txt"
     $before = if (Test-Path $latestFile) { (Get-Content $latestFile -Raw).Trim() } else { "" }
     try {

@@ -17,6 +17,7 @@ namespace AutonautsCoop
         public const int Protocol = 2;   // 2: hello carries the mod version; mismatches get a reason
         public static Coop I;
         public static Role Role = Role.Off;
+        public static bool WasClient;   // this game process mirrored a host world (stays set through the quit tear-down)
         public static string PendingWorld;          // client: world JSON to load from memory
         public const string CoopSaveName = "__coop_session__";
 
@@ -39,7 +40,7 @@ namespace AutonautsCoop
         // ---------- host ----------
         public void StartHost(int port)
         {
-            Role = Role.Host; Port = port;
+            Role = Role.Host; Port = port; WasClient = false;
             Host = new NetHost(); Host.StartTcp(port);
             Sync.OnHostStart();
         }
@@ -158,7 +159,7 @@ namespace AutonautsCoop
         /// Client side of any transport: the connection exists, say hello and wait for the snapshot.
         public void BeginClient(NetClient c)
         {
-            Role = Role.Client;
+            Role = Role.Client; WasClient = true;
             Client = c;
             Client.Host.Send(Msg.Hello, MakeHello().ToString());
         }
@@ -238,7 +239,7 @@ namespace AutonautsCoop
                 {
                     SendReadySnapshots();
                     long m0 = Prof.Mem;
-                    double a = Prof.Now; HostUpdate(); double b = Prof.Now; Prof.Add("joiner input", b - a); Prof.Alloc("input", m0);
+                    double a = Prof.Now; HostUpdate(); double b = Prof.Now; bool tw = Diag.InTestWork(); Prof.Add(tw ? "test checks" : "joiner input", b - a); Prof.Alloc(tw ? "test checks" : "input", m0);
                     long m1 = Prof.Mem;
                     Sync.HostTick(); double c = Prof.Now; Prof.Alloc("sync", m1);
                     long m2 = Prof.Mem;

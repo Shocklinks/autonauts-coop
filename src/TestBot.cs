@@ -50,6 +50,8 @@ namespace AutonautsCoop
                 resultPath = Path.Combine(Paths.BepInExRootPath, "coop_test_" + Mode + ".txt");
                 File.WriteAllText(resultPath, "");
                 if (Soak.On) { if (Mode == "host") Soak.BuildHost(steps); else Soak.BuildClient(steps); }
+                else if (NativeUITest.On) { if (Mode == "host") NativeUITest.BuildHost(steps); else NativeUITest.BuildClient(steps); }
+                else if (Four.On) { if (Mode == "host") Four.BuildHost(steps); else Four.BuildClient(steps); }
                 else if (Multi.On) { if (Mode == "host") Multi.BuildHost(steps); else Multi.BuildClient(steps); }
                 else if (Big) { if (Mode == "host") BigBase.BuildHost(steps); else BigBase.BuildClient(steps); }
                 else if (Mode == "host") TestScript.BuildHost(steps); else TestScript.BuildClient(steps);
@@ -63,7 +65,7 @@ namespace AutonautsCoop
             try { done = steps[step](el); }
             catch (Exception e) { Plugin.Log(e.ToString()); Assert("step " + step + " threw", false, e.Message); done = true; }
             if (done) { step++; stepT = Time.realtimeSinceStartup; Plugin.Log("[test] step " + step + " at " + (Time.realtimeSinceStartup - t0).ToString("F1") + "s"); }
-            else if (el > (Mode == "host" ? 1600f : Big || Soak.On ? 900f : 240f)) { Assert("step " + step + " timeout", false); step = steps.Count; }
+            else if (el > (Mode == "host" ? 1600f : Big || Soak.On || Four.On ? 900f : 240f)) { Assert("step " + step + " timeout", false); step = steps.Count; }
         }
 
         static float nextSkip, nextStateLog;

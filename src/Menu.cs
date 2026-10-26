@@ -1,5 +1,7 @@
 // AutonautsCoop - Menu.cs - F8 window: host / join / status
-// Version 0.5.0 - 2026-10-20 - Created with Claude
+// Version 0.12.38 - 2026-10-26 - Created with Claude
+// 0.12.38: everyday actions moved into the game's own menus (NativeUI.cs); this window keeps settings, status and the
+// bug report. Notices go to the game's panels; the plain box below is only the fallback when there is no HUD.
 using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
@@ -12,13 +14,19 @@ namespace AutonautsCoop
         bool show;
         Rect rect = new Rect(40, 40, 380, 400);
         string ip, port, status = "";
-        ConfigEntry<string> cfgIp;
-        ConfigEntry<int> cfgPort;
+        static ConfigEntry<string> cfgIp;
+        static ConfigEntry<int> cfgPort;
         ConfigEntry<KeyCode> cfgKey;
         static ConfigEntry<string> cfgName;
         string nameField = "";
         /// Name other players see; empty = Steam name (or "player" without Steam).
-        public static string PlayerName => cfgName != null ? cfgName.Value.Trim() : "";
+        public static string PlayerName
+        {
+            get => cfgName != null ? cfgName.Value.Trim() : "";
+            set { if (cfgName != null) cfgName.Value = (value ?? "").Trim(); }
+        }
+        public static int Port => cfgPort != null && cfgPort.Value > 0 && cfgPort.Value < 65536 ? cfgPort.Value : 27015;
+        public static string LastIp { get => cfgIp != null ? cfgIp.Value : "127.0.0.1"; set { if (cfgIp != null) cfgIp.Value = value; } }
 
         void Start()
         {
@@ -31,31 +39,33 @@ namespace AutonautsCoop
 
         void Update()
         {
-            if (Input.GetKeyDown(cfgKey.Value)) show = !show;
+            if (Input.GetKeyDown(cfgKey.Value) && !JoinPanel.IsOpen) show = !show;
+            try
+            {
+                Notify.Tick(); JoinPanel.Tick(); EndedBox.Tick();
+                // the host's pause, for joiners: a notice that stays while it lasts
+                Notify.Set("paused", Coop.Role == Role.Client && Coop.I.ClientLoaded && Speed.HostPaused ? "The host paused the game" : null);
+            }
+            catch (Exception e) { Plugin.Log("ui tick: " + e.Message); }
         }
 
         static string toast; static float toastUntil;
         public static string LastToast;
         public static readonly List<string> Toasts = new List<string>();   // tests
-        public static void Toast(string s) { toast = s; LastToast = s; Toasts.Add(s); toastUntil = Time.realtimeSinceStartup + 4f; Plugin.Log("toast: " + s); Diag.Log("toast: " + s); }
+        public static void Toast(string s)
+        {
+            LastToast = s; Toasts.Add(s); Plugin.Log("toast: " + s); Diag.Log("toast: " + s);
+            if (!Notify.Show(s)) { toast = s; toastUntil = Time.realtimeSinceStartup + 4f; }   // no HUD yet: the plain box
+        }
 
         void OnGUI()
         {
             try { Locks.OnGUI(); } catch (Exception e) { Plugin.Log("lock label: " + e.Message); }
             if (toast != null && Time.realtimeSinceStartup < toastUntil)
                 GUI.Box(new Rect(Screen.width / 2 - 200, Screen.height / 2 - 120, 400, 28), toast);
-            if (Coop.Role == Role.Off && Session.LastDisconnect != null && TestBot.AtMainMenu())
+            if (Coop.Role == Role.Off && Session.LastDisconnect != null && TestBot.AtMainMenu() && !EndedBox.Showing
+                && Time.realtimeSinceStartup - Session.LastDisconnectAt > 5f && !(TestBot.Active && !NativeUITest.On))
                 GUI.Window(0x0C01, new Rect(Screen.width / 2 - 260, Screen.height / 2 - 70, 520, 140), DrawEnded, "Co-op");
-            if (Coop.Role != Role.Off)
-            {
-                string s = Coop.Role == Role.Host ? "Co-op host: " + PeerCount() + " joined (port " + Coop.I.Port + ")"
-                         : Coop.I.ClientLoaded ? "Co-op: connected" : "Co-op: joining...";
-                if (Coop.Role == Role.Client && (Coop.I.Client?.Host == null || !Coop.I.Client.Host.Alive)) s = "Co-op: disconnected from host";
-                else if (Coop.Role == Role.Client && Coop.I.ClientLoaded && Speed.HostPaused) s += "   (host paused the game)";
-                if (Coop.Role == Role.Client && Coop.I.ClientLoaded && Speed.HostPaused)
-                    GUI.Box(new Rect(Screen.width / 2 - 120, 40, 240, 28), "Host paused the game");
-                GUI.Label(new Rect(10, Screen.height - 26, 600, 22), s + "   [" + cfgKey.Value + "]");
-            }
             if (!show) return;
             rect = GUI.Window(0x0C00, rect, Draw, "Autonauts Co-op " + Plugin.Version);
         }

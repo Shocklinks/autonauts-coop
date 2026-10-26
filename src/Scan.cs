@@ -27,7 +27,7 @@ namespace AutonautsCoop
         static readonly HashSet<int> badSave = new HashSet<int>();
         static List<int> ring = new List<int>(); static int ringIdx;
         public static int LastRescanned;
-        public static float FpRingSeconds = 4f;    // cheap look (fingerprint) at everything still, this often
+        public static float FpRingSeconds = 2f;    // cheap look (fingerprint) at everything still, this often (0.12.37: was 4 s)
         public static float SafetySeconds = 60f;   // full re-save regardless of the fingerprint, this often
         public static int StatRingSaves, StatRingSkips;
         public static double RingBudgetMs = 4.0;
@@ -95,6 +95,10 @@ namespace AutonautsCoop
                 h = h * 31 + (f.m_FarmerCarry != null && f.m_FarmerCarry.m_CarryObject != null ? f.m_FarmerCarry.m_CarryObject.Count * 1000 + (int)f.m_FarmerCarry.GetTopObjectType() : 0);
                 h = h * 31 + (int)(f.m_Energy / 5f);
                 h = h * 31 + (f.m_EngagedObject ? f.m_EngagedObject.m_UniqueID : 0);
+                // which items, not just how many of what type: a bot that swapped one stick for another (dropped into a
+                // bench, picked up the next) looked unchanged until its 8 s re-save
+                var co = f.m_FarmerCarry != null ? f.m_FarmerCarry.m_CarryObject : null;
+                if (co != null) for (int i = 0; i < co.Count; i++) if (co[i]) h = h * 31 + co[i].m_UniqueID;
             }
             // a bot's program variables (counters, flags): they change while it stands still
             if (b is Worker w && w.m_WorkerInterpreter != null)
@@ -137,6 +141,9 @@ namespace AutonautsCoop
             var t = b.GetType();
             foreach (var f in FieldsOf(t, fpNames, fpFieldsOf, false)) { var v = f.GetValue(b); h = h * 31 + (v != null ? v.GetHashCode() : 0); }
             foreach (var f in FieldsOf(t, fpLists, fpListsOf, true)) { var v = f.GetValue(b) as System.Collections.ICollection; h = h * 31 + (v != null ? v.Count : -1); }
+            // a hut's folk: what they are doing (not their energy, which changes all the time and made huts re-save
+            // every scan before 0.12.3)
+            if (b is Housing hs && hs.m_Folks != null) foreach (var fk in hs.m_Folks) if (fk) h = h * 31 + (int)fk.m_State;
             return h;
         }
 

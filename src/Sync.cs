@@ -495,6 +495,8 @@ namespace AutonautsCoop
             if (TestBot.Active && Soak.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && BigBase.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && Multi.HostOp((string)n0["a"], n0, from)) return;
+            if (TestBot.Active && Four.HostOp((string)n0["a"], n0, from)) return;
+            if (TestBot.Active && NativeUITest.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && TestScript.HostTestOp((string)n0["a"], n0, from)) return;
             if ((string)n0["a"] == "test_hostlock" && TestBot.Active)
             {
@@ -992,6 +994,7 @@ namespace AutonautsCoop
                             foreach (var h in cvx.m_Ingredients) if (h) Destroy(h);
                             cvx.m_Ingredients.Clear();
                         }
+                        if (b is Converter cvq) QuietIdle(cvq);
                         ResetRuntime(b);
                         // Savable.Load re-registers the UID (ChangeActionable); unregister first or it allocates a new one.
                         if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
@@ -1003,6 +1006,8 @@ namespace AutonautsCoop
                         // plants (and storage) apply part of what they load only on Refresh, as after the game's own load
                         if (!(b is Farmer)) b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
                         ApplyStored(b, o);
+                        // Load only notes a bird's tree when it has one; one that left its tree on the host kept it here
+                        if (b is AnimalBird abd && (o["Tree"] == null || o["Tree"].IsNull || o["Tree"].AsInt == 0)) birdTree(abd) = null;
                         string kindM = "in-place " + (string)o["ID"];
                         if (b.m_UniqueID == uid && TrustInPlace(kindM, uid)) { StatInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); Unchecked(uid); return; }
                         string got = Stable(b, SaveObject(b, out _));
@@ -1031,12 +1036,21 @@ namespace AutonautsCoop
         /// change: a stack's count went up by one, a bench got an ingredient. ~380 rebuilds in 3 minutes on a big base,
         /// each a pile of new objects (and the old ones' garbage). Reload the same building instead: its levels in
         /// place, its ingredients replaced. Anything else nested (unknown contents) still takes the rebuild.
+        /// Why a building could not be updated in place (once per type and reason in the diagnostics log; the 0.12.36
+        /// logs showed blueprint rebuilds with no reason).
+        static readonly HashSet<string> noLogged = new HashSet<string>();
+        static bool No(JSONNode o, string why)
+        {
+            string k = (string)o["ID"] + ": " + why;
+            if (noLogged.Add(k)) Diag.Log("in-place update of building " + k + ": rebuilt instead");
+            return false;
+        }
         static bool BuildingInPlace(Building bld, JSONNode o, string want, int uid, List<int> nested)
         {
             try
             {
                 // moved or turned on the host: that needs the map updated, which a rebuild does
-                if (bld.m_TileCoord.x != o["TX"].AsInt || bld.m_TileCoord.y != o["TY"].AsInt || bld.m_Rotation != o["Rotation"].AsInt) return false;
+                if (bld.m_TileCoord.x != o["TX"].AsInt || bld.m_TileCoord.y != o["TY"].AsInt || bld.m_Rotation != o["Rotation"].AsInt) return No(o, "moved or turned");
                 var lv = o["Levels"]; var lvArr = lv != null && !lv.IsNull ? lv.AsArray : null;
                 var ing = o["IngredientsItems"]; var ingArr = ing != null && !ing.IsNull ? ing.AsArray : null;
                 var known = new HashSet<int>();
@@ -1046,28 +1060,29 @@ namespace AutonautsCoop
                 var cf = bld as ConverterFoundation;
                 int newId = cf && o["NewID"] != null && !o["NewID"].IsNull ? o["NewID"].AsInt : 0;
                 if (newId > 0) known.Add(newId);
-                if (cf && (cf.m_Levels != null && cf.m_Levels.Count > 0)) return false;
-                foreach (var n in nested) if (!known.Contains(n)) return false;   // something else inside
+                if (cf && (cf.m_Levels != null && cf.m_Levels.Count > 0)) return No(o, "blueprint with levels");
+                foreach (var n in nested) if (!known.Contains(n)) return No(o, "other contents");   // something else inside
                 // the levels must be the same buildings, in the same order
                 int nl = lvArr != null ? lvArr.Count : 0;
                 int have = bld.m_Levels != null ? bld.m_Levels.Count : 0;
-                if (nl != have) return false;
+                if (nl != have) return No(o, "level count");
                 for (int i = 0; i < nl; i++)
                 {
                     var l = bld.m_Levels[i];
-                    if (!l || l.m_UniqueID != lvArr[i]["UID"].AsInt) return false;
+                    if (!l || l.m_UniqueID != lvArr[i]["UID"].AsInt) return No(o, "different levels");
                     var lnest = new List<int>(); CollectUIDs(lvArr[i].ToString(), l.m_UniqueID, lnest);
-                    if (lnest.Count > 0) return false;
+                    if (lnest.Count > 0) return No(o, "level with contents");
                 }
                 if (cf)
                 {
                     // a blueprint keeps its building-to-be (replacing it made the game's Load throw part-way); a
                     // different one means a rebuild. Load from idle: leaving "building" runs the stage-finished code.
                     var nbd = cf.m_NewBuilding;
-                    if (!nbd || nbd.m_UniqueID != newId || ObjectTypeList.Instance.GetIdentifierFromSaveName(o["New"], false) != nbd.m_TypeIdentifier) return false;
+                    if (!nbd || nbd.m_UniqueID != newId || ObjectTypeList.Instance.GetIdentifierFromSaveName(o["New"], false) != nbd.m_TypeIdentifier) return No(o, "different building-to-be");
                 }
                 var cv = bld as Converter;
-                if (ingArr != null && ingArr.Count > 0 && !cv) return false;
+                if (ingArr != null && ingArr.Count > 0 && !cv) return No(o, "ingredients on a non-converter");
+                if (cv && !cf) QuietIdle(cv);   // see QuietIdle: Load's SetState would otherwise finish the conversion here
                 if (cv && cv.m_Ingredients != null)
                 {
                     foreach (var h in cv.m_Ingredients) if (h) Destroy(h);
@@ -1076,13 +1091,17 @@ namespace AutonautsCoop
                 if (ingArr != null) foreach (JSONNode e in ingArr) { int u = e["UID"].AsInt; if (u > 0) FreeUid(u); }
                 if (cf)
                 {
-                    cf.m_State = Converter.State.Idle; InPlaceFoundation = cf;   // load from idle: leaving "building" runs the stage-finished code
+                    QuietIdle(cf); InPlaceFoundation = cf;   // load from idle: leaving "building" runs the stage-finished code
                     // its Load registers the building-to-be under NewID again: take it out first (else "same key" part-way)
                     if (ObjectTypeList.Instance.GetObjectFromUniqueID(newId, false) == cf.m_NewBuilding) ObjectTypeList.Instance.RemoveActionable(cf.m_NewBuilding);
                 }
                 if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == bld) ObjectTypeList.Instance.RemoveActionable(bld);
                 try { bld.GetComponent<Savable>().Load(o); } finally { InPlaceFoundation = null; }
                 bld.GetComponent<Savable>().PostLoad();
+                // the game's Load caps Stage at (stages - 1); the host saves "all stages done" for the moment a build
+                // completes, so the capped copy never matched and the blueprint was rebuilt right before it turned into
+                // the finished building (most of the joiner's rebuilds on BRAVO)
+                if (cf && o["Stage"] != null && !o["Stage"].IsNull) cf.m_Stage = o["Stage"].AsInt;
                 for (int i = 0; i < nl; i++)
                 {
                     var l = bld.m_Levels[i];
@@ -1196,7 +1215,10 @@ namespace AutonautsCoop
             // gone, or no longer registered (destroyed: removed at the end of the frame; and the game pools objects, so
             // "destroyed this update" can't be used, a Load may have taken the same object back with a new UID)
             bool Drop(Holdable x) => NotHeldBy(x, f) || (gone && x == gone) || (x && ObjectTypeList.Instance.GetObjectFromUniqueID(x.m_UniqueID, false) != x);
-            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => Drop(x)); } catch { }
+            // carried items always sit under the farmer (carry roots); one that is no longer under it went into a building,
+            // storage or onto the ground on the host, but stayed in the carry list here (0.12.36: a bot then saved four
+            // sticks where the host had three, and was rebuilt)
+            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => Drop(x) || !x.transform.IsChildOf(f.transform)); } catch { }
             foreach (var comp in new Component[] { f.m_FarmerInventory, f.GetComponent<FarmerUpgrades>(), f.GetComponent<FarmerClothes>() })
             {
                 if (!comp) continue;
@@ -1247,6 +1269,31 @@ namespace AutonautsCoop
                     }
             }
             catch (Exception e) { Plugin.Log("apply stored: " + e.Message); }
+        }
+
+        static readonly HarmonyLib.AccessTools.FieldRef<AnimalBird, MyTree> birdTree = HarmonyLib.AccessTools.FieldRefAccess<AnimalBird, MyTree>("m_CurrentTree");
+
+        /// A converter's Load ends with SetState(saved state). Going from Converting to Converting runs EndConverting
+        /// on our copy: it destroys the ingredients just loaded (a workbench came back empty and was rebuilt), counts a
+        /// blueprint stage, and fires the mods' "converter complete" callback on the joiner. Put it back to Idle first,
+        /// as a fresh copy would be, stopping the working sound it would otherwise leave playing.
+        static readonly Dictionary<Type, System.Reflection.FieldInfo> soundField = new Dictionary<Type, System.Reflection.FieldInfo>();
+        static void QuietIdle(Converter c)
+        {
+            if (!c || c.m_State == Converter.State.Idle) return;
+            try
+            {
+                var t = c.GetType();
+                if (!soundField.TryGetValue(t, out var f))
+                {
+                    for (var tt = t; tt != null && f == null; tt = tt.BaseType)
+                        f = tt.GetField("m_PlaySound", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly);
+                    soundField[t] = f;
+                }
+                if (f != null && f.GetValue(c) is PlaySound ps) { AudioManager.Instance.StopEvent(ps); f.SetValue(c, null); }
+            }
+            catch (Exception e) { Plugin.Log("quiet idle: " + e.Message); }
+            c.m_State = Converter.State.Idle;
         }
 
         static void ResetRuntime(BaseClass b)
@@ -1769,8 +1816,11 @@ namespace AutonautsCoop
     static class P_HousingQuitQuiet
     {
         // (a folk the joiner already removed could still be listed: drop those so the rest of the clean-up runs)
-        static void Prefix(Housing __instance) { if (Coop.Role == Role.Client && __instance.m_Folks != null) __instance.m_Folks.RemoveAll(f => !f); }
-        static Exception Finalizer(Exception __exception) => __exception is NullReferenceException && Coop.Role == Role.Client ? null : __exception;
+        // No role check in the prefix: at quit the session is reset (Role = Off) before the scene is torn down, so a
+        // Role == Client test missed exactly the case it was for (0.12.36: 3 errors at every joiner quit on BRAVO).
+        // Dropping already-destroyed entries is a plain null guard and harmless on the host.
+        static void Prefix(Housing __instance) { if (__instance.m_Folks != null) __instance.m_Folks.RemoveAll(f => !f); }
+        static Exception Finalizer(Exception __exception) => __exception is NullReferenceException && (Coop.Role == Role.Client || Coop.WasClient) ? null : __exception;
     }
 }
 

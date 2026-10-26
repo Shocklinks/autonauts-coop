@@ -8,14 +8,16 @@ INSTALL (every player, same version)
 Uninstall: delete winhttp.dll, doorstop_config.ini, .doorstop_version and the BepInEx folder.
 
 HOST
-1. Load or start a world. Press F8 > Host this world.
-2. The Steam invite window opens. Invite friends (F8 > Invite Steam friends reopens it).
-Going back to the main menu ends the session for everyone.
+1. Load or start a world. Press Esc > Host Multiplayer (right side of the pause screen).
+2. The Steam invite window opens. Esc > Invite Friends reopens it.
+3. Esc > Stop Hosting ends the session (it asks first). Going back to the main menu also ends it.
 
 JOIN
 1. Start Autonauts and stay on the main menu.
 2. Accept the Steam invite, or right-click the host in Steam > Join Game.
-Fallback: F8 > type the host's IP > Join (host must forward TCP 27015).
+Without Steam: main menu > Multiplayer > type the host's IP and your name > tick (host must forward TCP 27015).
+
+F8 still opens the co-op window: port, name, status and "Save bug report".
 
 WHAT JOINERS CAN DO
 - Walk, pick up, drop, use tools, chop, inventory keys (stow/recall/cycle/swap).
@@ -28,7 +30,7 @@ WHAT JOINERS CAN DO
   and comes back when you rejoin - next to the host if something was built where you stood. Survives host save/reload.
 - Bot groups: create, rename, recolour, delete; group Play/Stop/Pause/Drop/Call.
 - Notices when players join or leave. "Host has ended the lobby." when the host stops.
-- More than 2 players work. Joining by IP without Steam? Set your name in F8 first.
+- More than 2 players work. Joining by IP without Steam? Type your name in the Multiplayer panel.
 - Joiners don't autosave. Save As keeps your own copy of the world.
 - Both players need the same AutonautsCoop version; a mismatch is refused with a message.
 - Research, building unlocks, resources, time of day and wardrobe contents follow the host live.

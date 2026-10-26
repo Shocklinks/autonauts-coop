@@ -102,6 +102,7 @@ namespace AutonautsCoop
 
         public static Dictionary<int, int> Hashes()
         {
+            Diag.TestWork();   // a whole-world save: test-only cost, kept out of the frame stats
             var d = new Dictionary<int, int>();
             foreach (var e in Sync.TopLevel()) d[e.B.m_UniqueID] = e.Hash;
             return d;
@@ -109,6 +110,7 @@ namespace AutonautsCoop
 
         public static void Checksum(out int count, out long sum)
         {
+            Diag.TestWork();
             count = 0; sum = 0;
             foreach (var e in Sync.TopLevel()) { count++; sum += e.Hash; }
         }
