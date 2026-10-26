@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - watch.ps1 (started by Watch.bat)
-# Version 0.12.15 - 2026-10-23 - Created with Claude
+# Version 0.12.32 - 2026-10-26 - Created with Claude
 #
 # Waits for test requests and runs the kit for each one, so tests can be started without anyone at the PC.
 #   - A request is a small text file in kit\requests\ named <anything>.req, for example:
@@ -11,6 +11,8 @@
 #   - While a request runs it is renamed .running; when done, <name>.done says where the results are and the
 #     kit's console output is in <name>.log.
 #   - kit\watcher-status.txt shows that the watcher is alive (updated every few seconds).
+#   - "action=cleanzips" removes old AutonautsCoop-*.zip files from kit\ (keeps the newest).
+#   - "gc=<1-9>" runs the copies with GC_FREE_SPACE_DIVISOR (Unity's garbage collector setting) for a comparison.
 #   - A request with only "action=shutdown" shuts this PC down (60 s warning; "shutdown /a" in a command prompt
 #     cancels). It waits its turn: requests before it run first.
 #   - A file named "cancel" in kit\requests stops the test that is running (kit.ps1 checks for it).
@@ -31,13 +33,14 @@ function Set-Status([string]$s) {
 }
 
 function Read-Request([string]$path) {
-    $r = @{ mode = ""; save = ""; lag = 0; jitter = 0; minutes = 45; watch = 180; action = "" }
+    $r = @{ mode = ""; save = ""; lag = 0; jitter = 0; minutes = 45; watch = 180; action = ""; gc = 0 }
     foreach ($line in Get-Content $path) {
         if ($line -notmatch '^\s*([a-z]+)\s*=\s*(.*?)\s*$') { continue }
         $k = $Matches[1]; $v = $Matches[2]
         switch ($k) {
             "mode"    { if ($v -in @("full", "save")) { $r.mode = $v } }
-            "action"  { if ($v -eq "shutdown") { $r.action = $v } }
+            "action"  { if ($v -in @("shutdown", "cleanzips")) { $r.action = $v } }
+            "gc"      { $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 9) { $r.gc = $n } }
             "save"    { $r.save = $v }
             "lag"     { $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 2000) { $r.lag = $n } }
             "jitter"  { $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 2000) { $r.jitter = $n } }
@@ -74,6 +77,16 @@ while ($true) {
     $log = Join-Path $Req "$name.log"
     Move-Item -Path $next.FullName -Destination $running -Force
     $r = Read-Request $running
+    if ($r.action -eq "cleanzips") {
+        # keep the newest release zip in kit\ (the one tests use); remove the older AutonautsCoop-*.zip files
+        $zips = @(Get-ChildItem -Path $Kit -Filter "AutonautsCoop-*.zip" | Sort-Object LastWriteTime -Descending)
+        $gone = @()
+        foreach ($z in ($zips | Select-Object -Skip 1)) { try { Remove-Item $z.FullName -Force; $gone += $z.Name } catch {} }
+        Set-Content -Path $done -Value (@("kept: " + $(if ($zips.Count) { $zips[0].Name } else { "none" }), "removed $($gone.Count): " + ($gone -join ", "))) -Encoding UTF8
+        Remove-Item $running -Force -ErrorAction SilentlyContinue
+        Write-Host ("{0}  {1}: removed {2} old zips" -f (Get-Date -Format "HH:mm"), $name, $gone.Count) -ForegroundColor Cyan
+        continue
+    }
     if ($r.action -eq "shutdown") {
         Set-Content -Path $done -Value "shutting down $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (60 s; cancel with: shutdown /a)" -Encoding UTF8
         Remove-Item $running -Force -ErrorAction SilentlyContinue
@@ -100,7 +113,7 @@ while ($true) {
     Write-Host ("{0}  {1}: running {2}" -f (Get-Date -Format "HH:mm"), $name, $desc) -ForegroundColor Cyan
     Set-Status "running $name ($desc)"
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $Kit "kit.ps1"), "-Mode", $r.mode,
-              "-Lag", "$($r.lag)", "-Jitter", "$($r.jitter)", "-Minutes", "$($r.minutes)", "-WatchSeconds", "$($r.watch)")
+              "-Lag", "$($r.lag)", "-Jitter", "$($r.jitter)", "-Minutes", "$($r.minutes)", "-WatchSeconds", "$($r.watch)", "-GcDivisor", "$($r.gc)")
     if ($r.mode -eq "save") { $argList += @("-Save", $r.save) }
     $latestFile = Join-Path $Kit "results\latest.txt"
     $before = if (Test-Path $latestFile) { (Get-Content $latestFile -Raw).Trim() } else { "" }

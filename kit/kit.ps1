@@ -1,5 +1,5 @@
 # AutonautsCoop test kit - kit.ps1
-# Version 0.12.25 - 2026-10-23 - Created with Claude
+# Version 0.12.32 - 2026-10-26 - Created with Claude
 #
 # Runs two copies of Autonauts on this PC (a host and a joiner), both driven by the mod's built-in test bots,
 # and collects the results in kit\results\<date>-<mode>\.
@@ -16,7 +16,8 @@ param(
     [string]$Game = "",
     [string]$Work = "",
     [int]$Minutes = 45,
-    [int]$WatchSeconds = 180
+    [int]$WatchSeconds = 180,
+    [int]$GcDivisor = 0          # >0: start both copies with GC_FREE_SPACE_DIVISOR (Unity's collector; read at start)
 )
 $ErrorActionPreference = "Stop"
 $Kit = $PSScriptRoot
@@ -220,6 +221,7 @@ function Start-Role([string]$r) {
     $env:COOP_DATA = Join-Path $Work "data_$r"
     $env:COOP_NOSTEAM = "1"; $env:COOP_BIND = "127.0.0.1"; $env:COOP_IP = "127.0.0.1"; $env:COOP_PORT = "$Port"
     $env:COOP_LAG = "$Lag"; $env:COOP_JITTER = "$Jitter"
+    if ($GcDivisor -gt 0) { $env:GC_FREE_SPACE_DIVISOR = "$GcDivisor" } else { Remove-Item Env:GC_FREE_SPACE_DIVISOR -ErrorAction SilentlyContinue }
     if ($Mode -eq "save") { $env:COOP_SOAK = "1"; $env:COOP_SAVE = $Save; $env:COOP_SOAK_SECONDS = "$WatchSeconds" }
     else { Remove-Item Env:COOP_SOAK, Env:COOP_SAVE, Env:COOP_SOAK_SECONDS -ErrorAction SilentlyContinue }
     $d = Join-Path $Work $r
@@ -229,6 +231,7 @@ function Start-Role([string]$r) {
 }
 
 $label = $Mode + $(if ($Lag -gt 0 -or $Jitter -gt 0) { "-lag$Lag" } else { "" })
+if ($GcDivisor -gt 0) { $label += "-gc$GcDivisor" }
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $out = Join-Path $Kit "results\$stamp-$label"
 $resHost = Join-Path $Work "host\BepInEx\coop_test_host.txt"
@@ -320,6 +323,7 @@ $summary = @(
     "Mod $ver   Game $Game",
     $(if ($Mode -eq "save") { "Save: $Save" } else { "New world" }),
     "Lag: $Lag ms + $Jitter ms jitter each way",
+    $(if ($GcDivisor -gt 0) { "GC_FREE_SPACE_DIVISOR=$GcDivisor" } else { "GC: default" }),
     "PC: $cpu, $ramGB GB RAM, $gpu",
     "Took $([Math]::Round(((Get-Date) - $started).TotalMinutes, 1)) min. Finished: $done",
     "RESULT: $pass passed, $fail failed",

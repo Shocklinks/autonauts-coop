@@ -1430,13 +1430,12 @@ namespace AutonautsCoop
             });
             s.Add(el =>
             {
-                bool closed = el > 1f && Library.Open() == null;
-                bool told = Menu.Toasts.Exists(t => t.Contains("is editing the script library"));
-                if (!(closed && told) && el < 10f) return false;
-                TestBot.Assert("client: library closes with a message while the host edits it", closed && told, "closed " + closed + ", told " + told);
-                // a push anyway (as if edited during the hand-over): the host must refuse it and send its copy back
-                var sec = Shared.Get("Scripts").Save();
+                var sel = Library.Open();
+                if ((!sel || el < 1.5f) && el < 10f) return false;
+                TestBot.Assert("client: library opens for a look while the host edits it", sel != null);
+                // a change anyway: it must be undone here, with a message
                 WorkerScriptManager.Instance.AddScript("LockTestScript", new HighInstructionList(), ObjectType.WorkerHeadMk0, -1, -1, Color.white);
+                // and a push sent anyway (as if made during the hand-over): the host must refuse it
                 var m = new JSONObject(); m["a"] = "shared"; m["n"] = "Scripts"; m["s"] = Shared.Get("Scripts").Save();
                 Coop.I.Client.Host.Send(Msg.Input, m.ToString());
                 return true;
@@ -1444,8 +1443,10 @@ namespace AutonautsCoop
             s.Add(el =>
             {
                 bool gone = true; foreach (var sc in WorkerScriptManager.Instance.m_Scripts) if (sc.m_Name == "LockTestScript") gone = false;
-                if (!gone && el < 10f) return false;
-                TestBot.Assert("client: an edit without the lock is put back to the host's copy", gone);
+                bool told = Menu.Toasts.Exists(t => t.Contains("your change was undone"));
+                if (!(gone && told) && el < 10f) return false;
+                TestBot.Assert("client: a change while the host edits is undone with a message", gone && told, "gone " + gone + ", told " + told);
+                if (Library.Open() != null) GameStateManager.Instance.PopState();
                 return true;
             });
             s.Add(el =>

@@ -106,16 +106,46 @@ namespace AutonautsCoop
             var sw = System.Diagnostics.Stopwatch.StartNew();
             // pending changes go to the players already here; the new one gets them in its snapshot
             peer.Hold = true;
-            try { Sync.FlushBeforeSnapshot(); } finally { peer.Hold = false; }
+            Sync.FlushBeforeSnapshot();
+            double tFlush = sw.Elapsed.TotalMilliseconds;
             string world = CaptureWorld();
-            var packed = Gz.Pack(world);
-            Plugin.Log("snapshot for peer " + peer.Id + ": " + world.Length + " chars, " + packed.Length + " bytes gz, " + sw.ElapsedMilliseconds + " ms, objects " + ObjectCount());
-            peer.Send(Msg.Snapshot, packed);
-            var info = new JSONObject();
-            info["objects"] = ObjectCount();
-            peer.Send(Msg.Info, info.ToString());
-            Sync.OnPeerJoined(peer);
-            if (TestBot.Active && peer is WirePeer) TestScript.HostSendBlob(peer);
+            double tCapture = sw.Elapsed.TotalMilliseconds - tFlush;
+            int objects = ObjectCount();
+            // compress on another thread (it was a good part of the host's hitch when someone joined); what changes
+            // meanwhile is kept for the new player and sent right after its snapshot
+            peer.Deferred = new List<KeyValuePair<Msg, byte[]>>();
+            var th = new System.Threading.Thread(() =>
+            {
+                byte[] packed = null; string err = null;
+                try { packed = Gz.Pack(world); } catch (Exception e) { err = e.Message; }
+                lock (snapsReady) snapsReady.Add(new SnapJob { Peer = peer, Packed = packed, Err = err, Chars = world.Length, Objects = objects, Flush = tFlush, Capture = tCapture, Watch = sw });
+            });
+            th.IsBackground = true; th.Start();
+        }
+
+        class SnapJob { public Peer Peer; public byte[] Packed; public string Err; public int Chars, Objects; public double Flush, Capture; public System.Diagnostics.Stopwatch Watch; }
+        static readonly List<SnapJob> snapsReady = new List<SnapJob>();
+        /// Host (main thread): send snapshots whose compression finished, then what changed meanwhile.
+        void SendReadySnapshots()
+        {
+            List<SnapJob> ready = null;
+            lock (snapsReady) { if (snapsReady.Count == 0) return; ready = new List<SnapJob>(snapsReady); snapsReady.Clear(); }
+            foreach (var j in ready)
+            {
+                var peer = j.Peer;
+                if (j.Packed == null) { Plugin.Log("snapshot for peer " + peer.Id + " failed: " + j.Err); peer.Hold = false; peer.Deferred = null; continue; }
+                Plugin.Log("snapshot for peer " + peer.Id + ": " + j.Chars + " chars, " + j.Packed.Length + " bytes gz, flush " + j.Flush.ToString("F0") + " ms + capture " + j.Capture.ToString("F0")
+                    + " ms on the main thread, ready after " + j.Watch.ElapsedMilliseconds + " ms, objects " + j.Objects);
+                peer.Send(Msg.Snapshot, j.Packed);
+                var info = new JSONObject();
+                info["objects"] = j.Objects;
+                peer.Send(Msg.Info, info.ToString());
+                List<KeyValuePair<Msg, byte[]>> later;
+                lock (Host.Peers) { later = peer.Deferred; peer.Deferred = null; peer.Hold = false; }
+                if (later != null) foreach (var m in later) peer.Send(m.Key, m.Value);
+                Sync.OnPeerJoined(peer);
+                if (TestBot.Active && peer is WirePeer) TestScript.HostSendBlob(peer);
+            }
         }
 
         // ---------- client ----------
@@ -206,6 +236,7 @@ namespace AutonautsCoop
                 SteamNet.Pump();
                 if (Role == Role.Host)
                 {
+                    SendReadySnapshots();
                     long m0 = Prof.Mem;
                     double a = Prof.Now; HostUpdate(); double b = Prof.Now; Prof.Add("joiner input", b - a); Prof.Alloc("input", m0);
                     long m1 = Prof.Mem;

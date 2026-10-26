@@ -93,6 +93,32 @@ namespace AutonautsCoop
         static readonly Dictionary<string, int> verifiedRun = new Dictionary<string, int>();
         static readonly HashSet<int> mustVerify = new HashSet<int>();
         public static int StatVerifySkipped;
+        // ...and those unchecked ones are looked at again a moment later, each once however often it was updated
+        // meanwhile (drift found within ~2 s instead of at the next 10 s digest)
+        static readonly Dictionary<int, float> uncheckedAt = new Dictionary<int, float>();
+        static void Unchecked(int uid) { if (!uncheckedAt.ContainsKey(uid)) uncheckedAt[uid] = Time.realtimeSinceStartup; }
+        public static int StatLateChecks, StatLateFixes;
+        static readonly List<int> lateDue = new List<int>();
+        static void LateCheck()
+        {
+            if (uncheckedAt.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            lateDue.Clear();
+            foreach (var kv in uncheckedAt) if (now - kv.Value > 1.5f) { lateDue.Add(kv.Key); if (lateDue.Count >= 40) break; }
+            JSONArray need = null;
+            foreach (var uid in lateDue)
+            {
+                uncheckedAt.Remove(uid);
+                var b = ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false);
+                if (!b || !applied.TryGetValue(uid, out var ap) || ap.Key != b) continue;
+                StatLateChecks++;
+                if (Stable(b, SaveObject(b, out _)).GetHashCode() == ap.Value) continue;
+                StatLateFixes++; applied.Remove(uid); mustVerify.Add(uid);
+                (need ?? (need = new JSONArray())).Add(uid);
+            }
+            if (need != null) { var r = new JSONObject(); r["a"] = "need"; r["u"] = need; Coop.I.Client.Host.Send(Msg.Input, r.ToString()); Plugin.Log("late check: asking again for " + need.Count + " objects"); }
+        }
+
         static bool TrustInPlace(string kind, int uid)
         {
             if (mustVerify.Contains(uid)) return false;
@@ -213,7 +239,8 @@ namespace AutonautsCoop
         /// state as sent (the new peer gets it in the snapshot).
         public static void FlushBeforeSnapshot()
         {
-            Scan.Full();
+            // (no full re-save of the world: the snapshot is the game's own save; what our records have wrong is
+            // sent again later, harmlessly, when the scan sees it)
             nextScan = 0; nextMove = 0;
             HostTick();
             foreach (var kv in Scan.TopLevel()) sentHash[kv.Key] = kv.Value.Hash;
@@ -859,6 +886,8 @@ namespace AutonautsCoop
             // a blueprint's building-to-be is created by its Load and only named by "NewID"
             if (o["NewID"] != null && !o["NewID"].IsNull && o["NewID"].AsInt > 0) nested.Add(o["NewID"].AsInt);
             if (nested.Count > 0 && b is Housing hs && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && HousingInPlace(hs, o, want, uid)) return;
+            // (not blueprints: the game's blueprint Load throws part-way when its building-to-be is replaced, and the
+            //  half-loaded blueprint then broke the rebuild too; they keep the rebuild)
             if (nested.Count > 0 && b is Building bi && !(b is Housing) && !(b is ConverterFoundation) && !bi.m_ParentBuilding
                 && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && BuildingInPlace(bi, o, want, uid, nested)) return;
             if (nested.Count > 0)
@@ -884,7 +913,7 @@ namespace AutonautsCoop
                         b.GetComponent<Savable>().PostLoad();
                         ApplyStored(b, o);
                         string kindN = "nested " + (string)o["ID"];
-                        if (b.m_UniqueID == uid && TrustInPlace(kindN, uid)) { StatInPlace++; StatNestedInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); return; }
+                        if (b.m_UniqueID == uid && TrustInPlace(kindN, uid)) { StatInPlace++; StatNestedInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); Unchecked(uid); return; }
                         string got = Stable(b, SaveObject(b, out _));
                         bool okN = b.m_UniqueID == uid && got == StableW(b, want); Verified(kindN, uid, okN);
                         if (okN) { StatInPlace++; Applied(b, uid, StableW(b, want)); StatNestedInPlace++; return; }
@@ -910,6 +939,7 @@ namespace AutonautsCoop
                 Create(o);
                 return;
             }
+            if (b is Housing hz && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && HousingInPlace(hz, o, want, uid)) return;   // (its last folk moved out)
             if (b)
             {
                 var wantType = ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false);
@@ -944,7 +974,7 @@ namespace AutonautsCoop
                         if (!(b is Farmer)) b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
                         ApplyStored(b, o);
                         string kindM = "in-place " + (string)o["ID"];
-                        if (b.m_UniqueID == uid && TrustInPlace(kindM, uid)) { StatInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); return; }
+                        if (b.m_UniqueID == uid && TrustInPlace(kindM, uid)) { StatInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); Unchecked(uid); return; }
                         string got = Stable(b, SaveObject(b, out _));
                         bool okM = b.m_UniqueID == uid && got == StableW(b, want); Verified(kindM, uid, okM);
                         if (okM) { StatInPlace++; Applied(b, uid, StableW(b, want)); return; }
@@ -974,12 +1004,18 @@ namespace AutonautsCoop
         {
             try
             {
+                // moved or turned on the host: that needs the map updated, which a rebuild does
+                if (bld.m_TileCoord.x != o["TX"].AsInt || bld.m_TileCoord.y != o["TY"].AsInt || bld.m_Rotation != o["Rotation"].AsInt) return false;
                 var lv = o["Levels"]; var lvArr = lv != null && !lv.IsNull ? lv.AsArray : null;
                 var ing = o["IngredientsItems"]; var ingArr = ing != null && !ing.IsNull ? ing.AsArray : null;
                 var known = new HashSet<int>();
                 void Add(JSONNode e) { int u = e["UID"].AsInt; if (u > 0) known.Add(u); var l = new List<int>(); CollectUIDs(e.ToString(), u, l); foreach (var x in l) known.Add(x); }
                 if (lvArr != null) foreach (JSONNode e in lvArr) Add(e);
                 if (ingArr != null) foreach (JSONNode e in ingArr) Add(e);
+                var cf = bld as ConverterFoundation;
+                int newId = cf && o["NewID"] != null && !o["NewID"].IsNull ? o["NewID"].AsInt : 0;
+                if (newId > 0) known.Add(newId);
+                if (cf && (cf.m_Levels != null && cf.m_Levels.Count > 0)) return false;
                 foreach (var n in nested) if (!known.Contains(n)) return false;   // something else inside
                 // the levels must be the same buildings, in the same order
                 int nl = lvArr != null ? lvArr.Count : 0;
@@ -1000,6 +1036,14 @@ namespace AutonautsCoop
                     cv.m_Ingredients.Clear();
                 }
                 if (ingArr != null) foreach (JSONNode e in ingArr) { int u = e["UID"].AsInt; if (u > 0) FreeUid(u); }
+                if (cf)
+                {
+                    // a blueprint: its building-to-be is made again by its Load. Drop ours first (and load from idle:
+                    // leaving "building" runs the stage-finished code, which needs the building-to-be)
+                    if (cf.m_NewBuilding) { var nbd = cf.m_NewBuilding; cf.m_NewBuilding = null; nbd.StopUsing(); destroyedLastBatch = true; }   // (as the blueprint itself does: it never sat on the map)
+                    if (newId > 0) FreeUid(newId);
+                    cf.m_State = Converter.State.Idle;
+                }
                 if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == bld) ObjectTypeList.Instance.RemoveActionable(bld);
                 bld.GetComponent<Savable>().Load(o);
                 bld.GetComponent<Savable>().PostLoad();
@@ -1012,7 +1056,7 @@ namespace AutonautsCoop
                 }
                 ApplyStored(bld, o);
                 string kindB = "building " + (string)o["ID"];
-                if (bld.m_UniqueID == uid && TrustInPlace(kindB, uid)) { StatInPlace++; StatBuildingInPlace++; StatVerifySkipped++; Applied(bld, uid, StableW(bld, want)); return true; }
+                if (bld.m_UniqueID == uid && TrustInPlace(kindB, uid)) { StatInPlace++; StatBuildingInPlace++; StatVerifySkipped++; Applied(bld, uid, StableW(bld, want)); Unchecked(uid); return true; }
                 string got = Stable(bld, SaveObject(bld, out _));
                 bool okB = bld.m_UniqueID == uid && got == StableW(bld, want); Verified(kindB, uid, okB);
                 if (okB) { StatInPlace++; Applied(bld, uid, StableW(bld, want)); StatBuildingInPlace++; return true; }
@@ -1028,20 +1072,42 @@ namespace AutonautsCoop
             {
                 var arr = o["Folks"].AsArray;
                 int n = arr != null ? arr.Count : 0;
-                if (h.m_Folks == null || h.m_Folks.Count != n) return false;
-                var byUid = new Dictionary<int, Folk>();
-                foreach (var f in h.m_Folks) { if (!f) return false; byUid[f.m_UniqueID] = f; }
-                for (int i = 0; i < n; i++) if (!byUid.ContainsKey(arr[i]["UID"].AsInt)) return false;
+                if (h.m_Folks == null) return false;
+                h.m_Folks.RemoveAll(f => !f);
+                var wantUids = new HashSet<int>();
+                for (int i = 0; i < n; i++) wantUids.Add(arr[i]["UID"].AsInt);
+                // folk that moved out on the host: let them out here too (if the host has them elsewhere, that comes as
+                // its own update; if they're gone, the digest removes them)
+                foreach (var f in new List<Folk>(h.m_Folks)) if (!wantUids.Contains(f.m_UniqueID)) h.ReleaseFolk(f);
                 // the hut itself, without re-creating its folk
                 var shell = JSON.Parse(want); shell["Folks"] = new JSONArray();
                 if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == h) ObjectTypeList.Instance.RemoveActionable(h);
                 h.GetComponent<Savable>().Load(shell);
                 h.GetComponent<Savable>().PostLoad();
+                var order = new List<Folk>();
                 for (int i = 0; i < n; i++)
                 {
-                    var f = byUid[arr[i]["UID"].AsInt];
+                    int fu = arr[i]["UID"].AsInt;
+                    var f = ObjectTypeList.Instance.GetObjectFromUniqueID(fu, false) as Folk;
+                    bool inHut = f && h.m_Folks.Contains(f);
+                    if (!f)
+                    {
+                        // moved in on the host: a new one here (folk that already exist elsewhere are reused below)
+                        FreeUid(fu);
+                        var nb = ObjectTypeList.Instance.CreateObjectFromSaveName(arr[i], Vector3.zero, Quaternion.identity);
+                        f = nb ? nb.GetComponent<Folk>() : null;
+                        if (!f) return false;
+                    }
                     if (ObjectTypeList.Instance.GetObjectFromUniqueID(f.m_UniqueID, false) == f) ObjectTypeList.Instance.RemoveActionable(f);
                     f.GetComponent<Savable>().Load(arr[i]);
+                    if (!inHut) h.AddFolk(f);
+                    order.Add(f);
+                }
+                // the host's order (the last one is the one you see)
+                if (order.Count == h.m_Folks.Count)
+                {
+                    h.m_Folks.Clear(); h.m_Folks.AddRange(order);
+                    for (int i = 0; i < order.Count; i++) order[i].Show(i == order.Count - 1);
                 }
                 string got = Stable(h, SaveObject(h, out _));
                 if (h.m_UniqueID == uid && got == StableW(h, want)) { StatInPlace++; Applied(h, uid, StableW(h, want)); StatHousingInPlace++; return true; }
@@ -1275,6 +1341,7 @@ namespace AutonautsCoop
         {
             if (!Coop.I.ClientLoaded) return;
             if (recheckAt > 0 && Time.realtimeSinceStartup > recheckAt) { recheckAt = 0; Scan.Full(); Plugin.Log("joiner: re-checked the world after loading"); }
+            LateCheck();
             int editing = Teach.EditingUid();
             if (editing != lastEditing)
             {
@@ -1588,5 +1655,54 @@ namespace AutonautsCoop
             if (Coop.Role != Role.Client || !Sync.Applying) return;
             slow(__instance) = JSONUtils.GetAsInt(Node, "SL", 0) == 1;
         }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: Steam Workshop (Lua) mods run on every machine. Their world-changing calls (spawn, destroy, move, drop,
+    // start/stop a bot's script, clear tiles, rotate or fuel buildings, feed converters) also run on the host, whose
+    // results reach the joiner as normal updates; on the joiner they only made its world differ for a while. They do
+    // nothing there. (Definitions made at startup and purely visual calls still run.)
+    [HarmonyLib.HarmonyPatch]
+    static class P_ClientNoModWorldWrites
+    {
+        static readonly Dictionary<Type, string[]> blocked = new Dictionary<Type, string[]>
+        {
+            { typeof(ModBase), new[] { "SpawnItem", "SpawnLiquid" } },
+            { typeof(ModBot), new[] { "DropAllHeldObjects", "DropAllUpgrades", "MoveTo", "RechargeBot", "SetName", "SetScriptSavegameFormat", "SpawnBot", "StartScript", "StopScript" } },
+            { typeof(ModBuilding), new[] { "AddEnergy", "AddFuel", "AddHay", "AddWater", "SetBuildingName", "SetFlipped", "SetRotation" } },
+            { typeof(ModObject), new[] { "AddObjectToColonistHouse", "AddObjectToResearchStation", "AddObjectToStoneHead", "DestroyObject", "MoveToInstantly", "RepairColonistHouseWithObject", "SetObjectActive", "SetObjectDurability", "SetObjectRotation", "StartMoveTo", "UpdateMoveTo" } },
+            { typeof(ModPlayer), new[] { "DropAllHeldObjects", "DropAllUpgrades", "MoveTo", "SetPlayerStartLocation", "SetStartLocation" } },
+            { typeof(ModTiles), new[] { "ClearEverythingInArea", "ClearEverythingOnSingleTile", "ClearSpecificsInArea", "SetTile" } },
+            { typeof(ModConverter), new[] { "AddFuelToSpecifiedConverter", "AddIngredientToSpecifiedConverter" } },
+        };
+        static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            foreach (var kv in blocked)
+                foreach (var m in kv.Key.GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly))
+                    if (Array.IndexOf(kv.Value, m.Name) >= 0 && !m.IsAbstract && (m.ReturnType == typeof(void) || m.ReturnType == typeof(bool) || m.ReturnType == typeof(int)))
+                        yield return m;
+        }
+        static int logged;
+        static bool Prefix(System.Reflection.MethodBase __originalMethod)
+        {
+            if (Coop.Role != Role.Client || !Coop.I.ClientLoaded) return true;
+            if (logged++ < 5) Diag.Log("ignored a mod's world change on the joiner: " + __originalMethod.DeclaringType.Name + "." + __originalMethod.Name);
+            return false;   // (result stays default: nothing / false / 0)
+        }
+    }
+}
+
+namespace AutonautsCoop
+{
+    // Joiner: a hut's OnDestroy went through its folk list, which could still name a folk the joiner had already
+    // removed (three errors at every quit; mid-game it also left the hut's status indicator behind).
+    [HarmonyLib.HarmonyPatch(typeof(Housing), "OnDestroy")]
+    static class P_HousingQuitQuiet
+    {
+        // (a folk the joiner already removed could still be listed: drop those so the rest of the clean-up runs)
+        static void Prefix(Housing __instance) { if (Coop.Role == Role.Client && __instance.m_Folks != null) __instance.m_Folks.RemoveAll(f => !f); }
+        static Exception Finalizer(Exception __exception) => __exception is NullReferenceException && Coop.Role == Role.Client ? null : __exception;
     }
 }

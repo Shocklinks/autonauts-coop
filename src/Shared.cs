@@ -5,8 +5,8 @@
 // The script library and planning areas are plain manager data, not objects, and their editors change them with
 // direct calls and field writes. Instead of forwarding every small edit, the joiner watches the whole section while
 // its editor is open and sends the full section when it changes; the host replaces its copy and broadcasts it as a
-// normal world section. Only one player edits a section at a time (SectionLocks): the first to open it holds it,
-// others get a message and their editor closes (library, planning) or their changes are put back (groups).
+// normal world section. Only one player changes a section at a time (SectionLocks): the first to change it holds
+// it for a few seconds after their last change; a change anyone else makes meanwhile is undone with a message.
 using System;
 using System.Collections.Generic;
 using HarmonyLib;
@@ -23,8 +23,7 @@ namespace AutonautsCoop
         public Func<bool> Editing;           // local editor open: watch for changes
         public Func<bool> Busy;              // local editor holds references: wait before replacing
         public string Label;                 // for messages ("the script library")
-        public Action Close;                 // close the local editor (null: can't, changes are put back instead)
-        bool requested, warned; JSONNode lastHost;
+        bool requested; JSONNode lastHost;
 
         // joiner
         int baseHash, pushedHash; float pushedAt; bool wasEditing; JSONNode deferred;
@@ -36,30 +35,54 @@ namespace AutonautsCoop
         static int H(JSONNode n) => n == null ? 0 : JSON.Parse(n.ToString()).ToString().GetHashCode();
         JSONNode held;   // host data that arrived while our own edit was in flight
 
-        public void ClientReset() { baseHash = H(Safe()); pushedHash = 0; deferred = null; held = null; wasEditing = false; lastHost = Safe(); requested = warned = false; }
+        public void ClientReset() { baseHash = H(Safe()); pushedHash = 0; deferred = null; held = null; wasEditing = false; lastHost = Safe(); requested = false; seenHash = baseHash; wasOpen = false; }
 
         /// Both sides: take the section's lock while editing, give it back when done; if someone else holds it,
         /// say so and close the editor (or put the section back to the host's copy when the editor can't close).
+        // Locking follows changes, not open editors: several players can look at the library at once. Whoever
+        // changes it first holds it until HoldSeconds after their last change (or until their editor closes); a
+        // change anyone else makes meanwhile is undone with a message (their editor stays open).
+        public bool ChangeBased = true;      // false: Editing() itself means changing (bot groups: "touched lately")
+        const float HoldSeconds = 5f;
+        int seenHash; float lastChangeAt = -100f; bool wasOpen; JSONNode baseline;
+        /// Remember the current state as not-a-local-change (after taking someone else's copy).
+        void Rebase() { var n = Safe(); seenHash = H(n); baseline = n; }
+
         public void LockTick()
         {
-            bool ed = Editing();
+            bool open = Editing();
+            float now = Time.realtimeSinceStartup;
             bool mine = SectionLocks.Mine(Name), other = SectionLocks.HeldByOther(Name);
-            if (ed && other)
+            if (!ChangeBased) { if (open) lastChangeAt = now; }
+            else if (open)
             {
-                if (!warned) { warned = true; Menu.Toast(SectionLocks.Who(Name) + " is editing " + Label + ". Try again when they're done."); try { Close?.Invoke(); } catch { } }
+                int h = H(Safe());
+                if (!wasOpen) seenHash = h;                                    // just opened: nothing changed yet
+                else if (h != seenHash) { seenHash = h; lastChangeAt = now; }
+            }
+            if (!other && !requested && !mine) baseline = null;                  // free: nothing to protect
+            if (other && baseline == null) Rebase();                            // someone else started: this is the state to keep
+            wasOpen = open;
+            bool changing = now - lastChangeAt < HoldSeconds && (open || !ChangeBased);
+            if (changing && other)
+            {
+                // our change while someone else holds it: undo it
+                lastChangeAt = -100f;
+                Menu.Toast(SectionLocks.Who(Name) + " is editing " + Label + ": your change was undone. Try again when they're done.");
+                var back = Coop.Role == Role.Client ? lastHost : baseline;
+                if (back != null && H(Safe()) != H(back))
+                {
+                    if (Busy()) { if (Coop.Role == Role.Client) deferred = back; }
+                    else { Sync.Applying = true; try { Replace(back); if (Coop.Role == Role.Client) baseHash = H(Safe()); } finally { Sync.Applying = false; } }
+                }
+                seenHash = H(Safe());
                 return;
             }
-            if (ed && !mine && !requested) { requested = true; SectionLocks.Request(Name, true); }
-            if (!ed && (mine || requested))
+            if (changing && !mine && !requested) { requested = true; SectionLocks.Request(Name, true); }
+            if (!changing && (mine || requested))
             {
                 if (Coop.Role == Role.Client) Flush();   // last edits first
                 requested = false; SectionLocks.Request(Name, false);
-            }
-            if (!ed && warned)
-            {
-                warned = false;
-                // edited without the lock (bot groups can't be closed): back to the host's copy
-                if (Coop.Role == Role.Client && lastHost != null && H(Safe()) != H(lastHost)) { Sync.Applying = true; try { Replace(lastHost); baseHash = H(Safe()); } finally { Sync.Applying = false; } }
             }
         }
 
@@ -68,7 +91,7 @@ namespace AutonautsCoop
         {
             pushedHash = 0; held = null; lastHost = n;
             if (Busy()) { deferred = n; return; }
-            Sync.Applying = true; try { Replace(n); Replaces++; baseHash = H(Safe()); } finally { Sync.Applying = false; }
+            Sync.Applying = true; try { Replace(n); Replaces++; baseHash = H(Safe()); seenHash = baseHash; } finally { Sync.Applying = false; }
         }
 
         JSONNode Safe() { try { return Save(); } catch (Exception e) { Plugin.Log("shared " + Name + " save: " + e.Message); return null; } }
@@ -122,20 +145,20 @@ namespace AutonautsCoop
             if (pushedHash != 0) return;
             if (Busy()) { deferred = n; return; }
             Replace(n); Replaces++;
-            baseHash = H(Safe());
+            baseHash = H(Safe()); seenHash = baseHash;
         }
 
         /// Host: a joiner sent its copy.
         public void HostIncoming(JSONNode n)
         {
             if (Busy()) { queued = n; Plugin.Log("shared " + Name + " from joiner queued (host editing)"); return; }
-            Replace(n); Replaces++;
+            Replace(n); Replaces++; Rebase();
             Plugin.Log("shared " + Name + " replaced from joiner");
         }
 
         public void HostTick()
         {
-            if (queued != null && !Busy()) { var q = queued; queued = null; Replace(q); Replaces++; Plugin.Log("shared " + Name + " replaced from joiner (queued)"); }
+            if (queued != null && !Busy()) { var q = queued; queued = null; Replace(q); Replaces++; Rebase(); Plugin.Log("shared " + Name + " replaced from joiner (queued)"); }
         }
     }
 
@@ -144,7 +167,6 @@ namespace AutonautsCoop
         public static readonly SharedSection Scripts = new SharedSection
         {
             Name = "Scripts", Label = "the script library",
-            Close = () => { if (Library.Open() != null) GameStateManager.Instance.PopState(); },
             Save = () => { var n = new JSONObject(); WorkerScriptManager.Instance.Save(n); return n; },
             Replace = Library.Replace,
             Editing = () => Library.Open() != null,
@@ -154,7 +176,6 @@ namespace AutonautsCoop
         public static readonly SharedSection Planning = new SharedSection
         {
             Name = "Planning", Label = "the planning areas",
-            Close = () => { if (PlanAreas.InPlanning()) GameStateManager.Instance.PopState(); },
             Save = PlanAreas.Save,
             Replace = PlanAreas.Replace,
             Editing = PlanAreas.InPlanning,
@@ -163,7 +184,7 @@ namespace AutonautsCoop
 
         public static readonly SharedSection WorkerGroups = new SharedSection
         {
-            Name = "WorkerGroups", Label = "the bot groups",
+            Name = "WorkerGroups", Label = "the bot groups", ChangeBased = false,
             Save = Groups.Save,
             Replace = Groups.Replace,
             Editing = Groups.Editing,
@@ -502,7 +523,7 @@ namespace AutonautsCoop
                 if (cur != null && cur != key) { Plugin.Log("section lock refused: " + name + " wants " + sec + ", held by " + who[sec]); Broadcast(); return; }
                 if (cur == key) return;
                 owner[sec] = key; who[sec] = name;
-                if (key != Locks.HostKey) { var s = Shared.Get(sec); Menu.Toast(name + " is editing " + (s != null ? s.Label : sec)); }
+                if (key != Locks.HostKey) { var s = Shared.Get(sec); if (s != null && s.Editing()) Menu.Toast(name + " is editing " + s.Label); }   // (only if we're looking at it too)
             }
             else
             {
@@ -536,7 +557,7 @@ namespace AutonautsCoop
             foreach (JSONNode e in arr) { owner[e[0]] = e[2]; who[e[0]] = e[1]; }
             foreach (var kv in owner)
                 if (kv.Value != Locks.MyKey && (!before.TryGetValue(kv.Key, out var b) || b != kv.Value))
-                { var s = Shared.Get(kv.Key); Menu.Toast(who[kv.Key] + " is editing " + (s != null ? s.Label : kv.Key)); }
+                { var s = Shared.Get(kv.Key); if (s != null && s.Editing()) Menu.Toast(who[kv.Key] + " is editing " + s.Label); }
         }
         public static void Reset() { owner.Clear(); who.Clear(); }
     }

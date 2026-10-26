@@ -43,6 +43,7 @@ namespace AutonautsCoop
                 File.WriteAllText(LogPath, "");
             }
             catch (Exception e) { Plugin.Log("diag init: " + e.Message); }
+            Log("garbage collector: GC_FREE_SPACE_DIVISOR=" + (Environment.GetEnvironmentVariable("GC_FREE_SPACE_DIVISOR") ?? "(default)"));
             Log("AutonautsCoop " + Plugin.Version + " diagnostics" + (On ? "" : " OFF") + "  " + SystemInfo.operatingSystem + "  " + SystemInfo.processorType + "  RAM " + SystemInfo.systemMemorySize + " MB  GPU " + SystemInfo.graphicsDeviceName);
             if (NetSim.LagMs > 0 || NetSim.JitterMs > 0) Log("SIMULATED LAG: " + NetSim.LagMs + " ms + up to " + NetSim.JitterMs + " ms jitter, each way");
         }

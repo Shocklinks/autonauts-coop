@@ -36,6 +36,7 @@ namespace AutonautsCoop
         public static long BytesSent, BytesRecv;   // stats (all peers)
         public float Rtt = -1f;                    // seconds, measured with Msg.Echo
         public bool Hold;                          // host: not yet in the broadcast (its snapshot is being made)
+        public List<KeyValuePair<Msg, byte[]>> Deferred;   // host: broadcasts while Hold, sent right after its snapshot
         public abstract void Send(Msg t, byte[] data);
         public void Send(Msg t, string s)
         {
@@ -167,10 +168,15 @@ namespace AutonautsCoop
 
         public void Broadcast(Msg t, byte[] d)
         {
-            lock (Peers) foreach (var p in Peers) if (p.Alive && p.Name != "?" && !p.Hold) p.Send(t, d);
+            lock (Peers) foreach (var p in Peers)
+                {
+                    if (!p.Alive || p.Name == "?") continue;
+                    if (!p.Hold) p.Send(t, d);
+                    else if (p.Deferred != null) p.Deferred.Add(new KeyValuePair<Msg, byte[]>(t, d));
+                }
         }
 
-        public bool AnyRecipient() { lock (Peers) return Peers.Exists(p => p.Alive && p.Name != "?" && !p.Hold); }
+        public bool AnyRecipient() { lock (Peers) return Peers.Exists(p => p.Alive && p.Name != "?" && (!p.Hold || p.Deferred != null)); }   // (one waiting for its snapshot keeps what changes)
 
         public void Stop()
         {
