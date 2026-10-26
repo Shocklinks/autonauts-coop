@@ -1,4 +1,4 @@
-Autonauts Co-op @VERSION@ (alpha) - @DATE@ - Created with Claude
+Autonauts Co-op @VERSION@ (beta) - @DATE@ - Created with Claude
 Mod loader: BepInEx 5.4.23.5 (included). Game: Autonauts (Steam).
 
 INSTALL (every player, same version)
@@ -39,8 +39,9 @@ WHAT JOINERS CAN DO
 - Game speed and pause: the host decides; joiners follow.
 
 STATUS
-- Tested automatically (2 game copies, one machine): everything above + whole-world checksum.
-- Steam invites: NOT YET TESTED on real Steam.
+- BETA. Tested automatically (2 and 4 game copies on one machine) and over the internet through Steam (2 PCs).
+- Creative mode: joiners can use the Creative spawn menu.
+- Joiners can't load a save while connected (it would crash): quit to the main menu first.
 - Host-only: changing game speed.
 Bug reports: F8 > Save bug report, then send the zip from BepInEx\bugreports (a joiner's zip includes the host's log).
 When something goes wrong, press F7 right away: it marks the moment in both players' diagnostics logs

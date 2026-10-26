@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.38**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **beta 0.13.0**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -68,6 +68,19 @@ Status: **alpha 0.12.38**. Not affiliated with Denki or Curve Games. Contains no
 - Bots and players picking things up or putting them down are reloaded in place instead of rebuilt, so they stay
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
+
+## 0.13.0 (first beta)
+
+- **Creative mode:** joiners can spawn items, containers, folk and bots from the Creative menu. The host makes them
+  (into the joiner's hands, bots next to them), so everyone sees the same thing.
+- **Joiners can't load a save while connected** (it crashed the game): the pause screen has no Load button for
+  joiners, and anything else that opens the Load screen is turned back with a message.
+- Tested over the internet through Steam (two PCs) by the owner; the automated two- and four-player tests pass.
+- Please report problems with the F8 > "Save bug report" zip from both players (GitHub issues).
+
+## 0.12.39
+
+- Fixed: ~470 "Could not find field" warnings in BepInEx\\LogOutput.log on a big save (harmless, just noise).
 
 ## 0.12.38: multiplayer in the game's own menus
 
@@ -242,9 +255,9 @@ within seconds. Fixed:
 
 - Planning areas sync when the editor leaves planning mode (and while drawing); two people editing areas at the
   same moment: last one wins.
-- Steam invites are written but **not yet tested on real Steam** (needs two PCs, two accounts that each own the game).
+- Steam: tested between two PCs over the internet (0.12.39); more real-world testing needed (beta).
 - Joiners on 0.7.0 or older can't get the version message from a 0.8.0+ host (they just get disconnected).
-- Not tested over the internet. The big-base test ran on a small map (two medium maps didn't fit this test
+- Over the internet: one two-PC Steam session so far. The big-base test ran on a small map (two medium maps didn't fit this test
   machine's memory); real medium/large late-game worlds still need a real-PC test.
 - Changes to things that don't move (e.g. storage contents) reach joiners within ~5 s instead of instantly.
 

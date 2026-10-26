@@ -492,6 +492,7 @@ namespace AutonautsCoop
                 st["step"] = n0["step"]; r["botstate"] = st; from.Send(Msg.Info, r.ToString());
                 return;
             }
+            if (Creative.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && Soak.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && BigBase.HostOp((string)n0["a"], n0, from)) return;
             if (TestBot.Active && Multi.HostOp((string)n0["a"], n0, from)) return;

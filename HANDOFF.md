@@ -117,7 +117,7 @@ Sandbox limits:
 1. Bump `Version` in `src/Plugin.cs` and its header comment.
 2. Update `README.md`: the status line, the test counts, and the "what works" / "known issues" lists. Update `dist/README-COOP.txt` (the player readme) if features changed.
 3. Build, then run TCP + UDP (and the big test if sync or performance code changed) until clean.
-4. Commit and push to `main`. Tag `vX.Y.Z-Alpha` (the existing tag style).
+4. Commit and push to `main`. Tag `vX.Y.Z-Beta` from 0.13.0 on (alpha tags were `vX.Y.Z-Alpha`).
 5. Create a GitHub release for that tag with the zip from `tools/package.sh` attached; players download it from there.
 6. Hub: no change needed for normal releases (the entry links to this repo). Update PR #112, or open a new hub PR
    after it merges, only for milestones: a status change, a real Steam test result, or a major feature or known issue.

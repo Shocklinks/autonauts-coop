@@ -92,10 +92,10 @@ namespace AutonautsCoop
 
         public static bool AtMainMenu() => SceneManager.GetActiveScene().name == "MainMenu";
 
-        public static void StartNewGame()
+        public static void StartNewGame(GameOptions.GameMode mode = GameOptions.GameMode.ModeCampaign)
         {
             var o = GameOptionsManager.Instance.m_NewOptions;
-            o.m_GameMode = GameOptions.GameMode.ModeCampaign;
+            o.m_GameMode = mode;
             o.m_TutorialEnabled = false;
             o.m_RecordingEnabled = false;
             SessionManager.Instance.LoadLevel(false, "Main");

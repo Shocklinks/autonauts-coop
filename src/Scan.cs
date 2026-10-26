@@ -124,7 +124,11 @@ namespace AutonautsCoop
             var l = new List<System.Reflection.FieldInfo>();
             foreach (var n in names)
             {
-                var f = HarmonyLib.AccessTools.Field(t, n);
+                // (plain reflection up the class chain: AccessTools.Field logs a warning for every type without the
+                //  field, ~470 lines in LogOutput.log on a big save)
+                System.Reflection.FieldInfo f = null;
+                for (var tt = t; tt != null && f == null; tt = tt.BaseType)
+                    f = tt.GetField(n, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly);
                 if (f == null || f.IsStatic) continue;
                 if (lists ? typeof(System.Collections.ICollection).IsAssignableFrom(f.FieldType) : (f.FieldType.IsPrimitive || f.FieldType.IsEnum || f.FieldType == typeof(string))) l.Add(f);
             }

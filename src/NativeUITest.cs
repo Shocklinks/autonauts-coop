@@ -9,6 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using BepInEx;
+using HarmonyLib;
 using SimpleJSON;
 using UnityEngine;
 
@@ -29,7 +30,7 @@ namespace AutonautsCoop
         static void ClosePause() { if (Paused()) GameStateManager.Instance.PopState(); }
 
         // host <-> joiner: the joiner says when it has looked at everything
-        static int joinerStage;
+        static int joinerStage; static ObjectType spawnType;
         public static bool HostOp(string a, JSONNode n, Peer from)
         {
             if (a == "uit") { joinerStage = n["k"].AsInt; return true; }
@@ -43,7 +44,7 @@ namespace AutonautsCoop
             s.Add(el => TestBot.AtMainMenu() && el > 8f);
             // (straight away, like the other tests: a couple of seconds later the menu's own map preview is being made
             //  and a new world started then fails to generate)
-            s.Add(el => { TestBot.StartNewGame(); return true; });
+            s.Add(el => { TestBot.StartNewGame(GameOptions.GameMode.ModeCreative); return true; });   // creative: the joiner's spawn menu is tested too
             s.Add(el => Coop.InGame() && GameStateManager.Instance.GetActualState() == GameStateManager.State.Normal && el > 10f);
             s.Add(el => { OpenPause(); return el > 1.5f; });
             s.Add(el =>
@@ -55,12 +56,12 @@ namespace AutonautsCoop
             });
             s.Add(el => el > 1f);
             s.Add(el => { NativeUI.Click(P_PausedCoopButtons.HostButton); return true; });
+            s.Add(el => (Coop.Role == Role.Host && el > 1f) || el > 10f);
             s.Add(el =>
             {
-                if (Coop.Role != Role.Host && el < 10f) return false;
                 TestBot.Assert("host: \"Host Multiplayer\" starts hosting", Coop.Role == Role.Host);
                 TestBot.Assert("host: back in the game after hosting", !Paused());
-                return el > 1f;
+                return true;
             });
             s.Add(el => { Shot("3_hosting_notice"); return true; });
             // the joiner joins: "joined the game" notice
@@ -100,8 +101,9 @@ namespace AutonautsCoop
             {
                 TestBot.Assert("host: confirming stops hosting", Coop.Role == Role.Off);
                 ClosePause();
-                return el > 30f;   // the joiner's box
+                return true;
             });
+            s.Add(el => el > 30f);   // the joiner's box
         }
 
         // ---------------- joiner ----------------
@@ -160,10 +162,43 @@ namespace AutonautsCoop
             s.Add(el =>
             {
                 TestBot.Assert("joiner: no host buttons in a joiner's pause menu", P_PausedCoopButtons.HostButton == null && P_PausedCoopButtons.StopButton == null);
+                var load = P_PausedCoopButtons.Last ? P_PausedCoopButtons.Last.transform.Find("LoadButton") : null;
+                TestBot.Assert("joiner: no Load button in a joiner's pause menu", load && !load.gameObject.activeSelf);
                 Shot("5_pause");
+                P_PausedCoopButtons.Last.OnLoad(null);   // and if it is reached anyway, it is refused
                 return true;
             });
-            s.Add(el => { ClosePause(); Tell(1); return el > 1f; });
+            s.Add(el =>
+            {
+                if (el < 1f) return false;
+                TestBot.Assert("joiner: Load is refused while connected", GameStateManager.Instance.GetActualState() == GameStateManager.State.Paused, GameStateManager.Instance.GetActualState().ToString());
+                return true;
+            });
+            s.Add(el => { ClosePause(); return el > 1f; });
+            // creative mode: the spawn menu makes the item on the host, into my hands
+            s.Add(el => { GameStateManager.Instance.PushState(GameStateManager.State.CreativeTools); return el > 1.5f; });
+            s.Add(el =>
+            {
+                var ct = UnityEngine.Object.FindObjectOfType<CreativeTools>();
+                var bl = ct ? Traverse.Create(ct).Field("m_ObjectButtons").GetValue<List<BaseButtonImage>>() : null;
+                var ol = ct ? Traverse.Create(ct).Field("m_ObjectList").GetValue<List<ObjectInfo>>() : null;
+                Shot("5b_creative");
+                int pick = -1;
+                if (ol != null) for (int i = 0; i < ol.Count; i++) if (ol[i].m_Type == ObjectInfo.Type.Normal && !QuestManager.Instance.m_ObjectsLocked.ContainsKey(ol[i].m_ObjectType)) { pick = i; break; }
+                TestBot.Assert("joiner: creative spawn menu opens", ct && pick >= 0);
+                if (pick >= 0) { spawnType = ol[pick].m_ObjectType; NativeUI.Click(bl[pick]); }
+                return true;
+            });
+            s.Add(el =>
+            {
+                var me = ObjectTypeList.Instance.GetObjectFromUniqueID(Sync.MyPlayerUID, false);
+                var f = me ? me.GetComponent<Farmer>() : null;
+                bool ok = f && f.m_FarmerCarry.GetTopObjectType() == spawnType;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("joiner: creative spawn puts the item in my hands (made by the host)", ok, spawnType + ", holding " + (f ? f.m_FarmerCarry.GetTopObjectType().ToString() : "?"));
+                return true;
+            });
+            s.Add(el => { if (el < 2f) return false; Shot("5c_spawned"); Tell(1); return true; });
             // the host stops: back to the main menu with the game's box
             s.Add(el => (Coop.Role == Role.Off && TestBot.AtMainMenu() && EndedBox.Showing) || el > 120f);
             s.Add(el =>
