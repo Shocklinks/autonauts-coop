@@ -3,7 +3,7 @@
 Online co-op for [Autonauts](https://store.steampowered.com/app/979120/Autonauts/) (Steam, Unity 2018.4.35f1, Mono).
 BepInEx 5 plugin. Host-authoritative: the host runs the world; joiners see a mirror and send their clicks to the host.
 
-Status: **alpha 0.12.35**. Not affiliated with Denki or Curve Games. Contains no game files.
+Status: **alpha 0.12.36**. Not affiliated with Denki or Curve Games. Contains no game files.
 
 ## What works (automated two-instance test: 112/112 over TCP, 95/95 over the Steam-style wire, 113/113 with simulated lag, 15/15 three-player, 7/7 big-base stress test)
 
@@ -69,6 +69,22 @@ Status: **alpha 0.12.35**. Not affiliated with Denki or Curve Games. Contains no
   clickable and selected on the joiner (many busy bots were hard to click before).
 - A joiner who lost the host can host their own game afterwards (the old Steam lobby is now forgotten).
 
+## 0.12.36: script library merges, fewer rebuilds, smaller join hitch
+
+- **Script library merges by script instead of locking.** Players can change different scripts and folders at the
+  same time; each push keeps only what that player changed. If two players change the same script, the first change
+  stays and the other player is told theirs wasn't kept. Planning areas and bot groups still lock.
+- **Blueprints update in place** on the joiner (they keep their building-to-be); a moved or turned one is rebuilt.
+- **Items falling out of a bot's or player's hands** are detached in place instead of rebuilt.
+- **Hut folk keep their state** (working, sleeping...) on the joiner after an update.
+- Fixed: the joiner's own player could be left wearing a hat (or holding an item) that no longer existed after the
+  item moved to someone else.
+- **Smaller host hitch on the first join:** the host prepares its change records a few ms at a time before anyone
+  joins, instead of all at once when the first player connects.
+- **Less host garbage:** rarely changing world sections (quests, script library, bot groups) are checked less often
+  while they stay the same, and something that just changed is re-saved at most once a second unless a cheap look
+  sees it change again.
+
 ## 0.12.32-0.12.35: mods, joining, huts and blueprints, editor locks
 
 - **Workshop (Lua) mods don't change the world on the joiner** (spawn, destroy, move, drop, start/stop bot scripts,
@@ -83,12 +99,7 @@ Status: **alpha 0.12.35**. Not affiliated with Denki or Curve Games. Contains no
 - **Joiner re-checks unverified updates within ~2 s** instead of waiting for the 10 s check.
 - Fixed: a hut on the joiner could list a folk that was already gone (errors at every quit; its status indicator
   could be left behind).
-- **Optional: fewer garbage-collection pauses.** On a big save the game pauses ~0.2 s now and then to collect garbage
-  (the game alone does this too). Starting the game with `GC_FREE_SPACE_DIVISOR=1` made those pauses about half as
-  frequent in the test kit (host: 3 instead of 7 in ~3 minutes), each about 15% longer, at the cost of some extra
-  memory. In Steam: Autonauts > Properties > Launch options: `cmd /c "set GC_FREE_SPACE_DIVISOR=1 && %command%"`.
-  Remove the line to go back. `BepInEx/coop_diag.log` shows whether it is on ("garbage collector: ...").
-- Test kit: `gc=<n>` request option (Unity's GC_FREE_SPACE_DIVISOR for both copies) and `action=cleanzips`.
+- Test kit: `action=cleanzips`.
 
 ## 0.12.25-0.12.31: one editor at a time, faster updates, less garbage
 

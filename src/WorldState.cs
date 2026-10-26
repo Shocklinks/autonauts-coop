@@ -84,16 +84,18 @@ namespace AutonautsCoop
             return n;
         }
 
-        public static void ResetSent() { sent.Clear(); next = 0; prevLocked = null; due.Clear(); }
+        public static void ResetSent() { sent.Clear(); next = 0; prevLocked = null; due.Clear(); same.Clear(); }
 
         // One section per frame, each on its own timer: saving them all at once (quests are big in a late game) made a
         // stutter every second. A section that is slow to save is checked less often (at most every 6 s).
         static readonly Dictionary<string, float> due = new Dictionary<string, float>();
+        static readonly Dictionary<string, int> same = new Dictionary<string, int>();
+        static readonly HashSet<string> Backoff = new HashSet<string> { "Quest", "Locked", "Scripts", "WorkerGroups", "OffworldMissions", "Wardrobe" };
         static int nextSection;
         public static void HostTick(bool force = false)
         {
             float now = Time.realtimeSinceStartup;
-            var w = new JSONObject();
+            JSONObject w = null;   // (made only when something is sent: this runs every frame)
             for (int i = 0; i < Sections.Length; i++)
             {
                 string s = Sections[(nextSection + i) % Sections.Length];
@@ -103,11 +105,17 @@ namespace AutonautsCoop
                 try { node = SaveSection(s); } catch (Exception e) { Plugin.Log("world " + s + " save: " + e.Message); due[s] = now + Every; continue; }
                 int h = node.ToString().GetHashCode();
                 double ms = Prof.Now - t0; Prof.Add("section " + s, ms);
-                due[s] = now + Mathf.Clamp((float)ms * 0.15f, Every, 6f);
-                if (!(sent.TryGetValue(s, out int old) && old == h)) { sent[s] = h; w[s] = node; }
+                bool changed = !(sent.TryGetValue(s, out int old) && old == h);
+                if (changed) { sent[s] = h; if (w == null) w = new JSONObject(); w[s] = node; same[s] = 0; }
+                else if (Backoff.Contains(s)) same[s] = (same.TryGetValue(s, out int k) ? k : 0) + 1;
+                // rarely changing sections that stayed the same are looked at less often (up to every 4 s): saving
+                // the quest list and the script library every second was most of the sections' garbage
+                float wait = Every;
+                if (same.TryGetValue(s, out int st) && st > 0) wait = Mathf.Min(Every * (1 << Mathf.Min(st, 3)), 4f);
+                due[s] = now + Mathf.Clamp((float)ms * 0.15f, wait, 6f);
                 if (!force) { nextSection = (nextSection + i + 1) % Sections.Length; break; }
             }
-            if (w.Count == 0) return;
+            if (w == null || w.Count == 0) return;
             var m = new JSONObject(); m["world"] = w;
             var keys = new List<string>(); foreach (var s in Sections) if (w[s] != null && !w[s].IsNull) keys.Add(s);
             if (TestBot.Active) Plugin.Log("world sent: " + string.Join(",", keys.ToArray()));

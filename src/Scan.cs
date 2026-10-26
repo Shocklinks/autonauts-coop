@@ -32,7 +32,23 @@ namespace AutonautsCoop
         public static int StatRingSaves, StatRingSkips;
         public static double RingBudgetMs = 4.0;
 
-        public static void Reset() { Cache.Clear(); parentOf.Clear(); force.Clear(); ring.Clear(); ringIdx = 0; }
+        /// Hosting starts with a cache filled earlier (Warm): spread the periodic full re-saves over their period, or
+        /// they would all fall due in the first scan.
+        public static void Spread()
+        {
+            float now = Time.realtimeSinceStartup;
+            // what's left from an earlier world (or destroyed since): forget it, and any "inside" link it made
+            var dead = new List<int>();
+            foreach (var kv in Cache) if (!kv.Value.B || kv.Value.B.m_UniqueID != kv.Key) dead.Add(kv.Key);
+            foreach (var u in dead) Cache.Remove(u);
+            var loose = new List<int>();
+            foreach (var kv in parentOf) if (!Cache.TryGetValue(kv.Value, out var pc) || pc.Nested == null || !pc.Nested.Contains(kv.Key)) loose.Add(kv.Key);
+            foreach (var u in loose) parentOf.Remove(u);
+            force.Clear(); ring.Clear(); ringIdx = 0;
+            foreach (var kv in Cache)
+                if (kv.Value.B) kv.Value.LastFull = now - UnityEngine.Random.value * (Moves(kv.Value.B) ? MoverFullEvery : SafetySeconds);
+        }
+        public static void Reset() { Cache.Clear(); parentOf.Clear(); force.Clear(); ring.Clear(); ringIdx = 0; nextWarm = 0; warmLogged = false; }
         public static void Force(int uid) { force.Add(uid); }
         /// Host: something happened to this object (the game's SendAction: added to, taken from, engaged, held...).
         /// Look at it, or what it sits in, next scan instead of waiting for the slow round.
@@ -62,6 +78,8 @@ namespace AutonautsCoop
                     if (t != null) { T(t.m_Building); T(t.m_BuildingFootprint); }
                 }
         }
+        public static float HotFullEvery = 1f;
+        public static int StatHotSkips;
         public static float MoverFullEvery = 8f;   // full re-save regardless of the fingerprint (bots someone has open: every scan)
         public static int StatMoverSaves, StatMoverSkips;
 
@@ -209,7 +227,13 @@ namespace AutonautsCoop
                     }
                     continue;
                 }
-                if (now < c.HotUntil || (b.transform.position - c.Pos).sqrMagnitude > 0.0001f) Rescan(b, now);
+                if ((b.transform.position - c.Pos).sqrMagnitude > 0.0001f) { Rescan(b, now); continue; }
+                if (now < c.HotUntil)
+                {
+                    // just changed: look again soon, but re-save only when the cheap look changed or once a second
+                    // (re-saving it every scan for 3 s was much of the scan's garbage)
+                    if (StaticFp(b) != c.Fp2 || now - c.LastFull >= HotFullEvery) Rescan(b, now); else StatHotSkips++;
+                }
             }
             // a slice of everything else
             if (ringIdx >= ring.Count) { ring = new List<int>(Cache.Keys); ringIdx = 0; }
@@ -233,6 +257,30 @@ namespace AutonautsCoop
             }
             DropMissing(false);
             force.Clear();
+        }
+
+        /// Host with nobody joined yet: fill the cache a few ms at a time, so the first joiner doesn't wait for (and
+        /// the host doesn't hitch on) saving every object at once. Returns how many were still missing.
+        static float nextWarm; static bool warmLogged;
+        public static int Warm(double budgetMs = 2.0)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < nextWarm) return -1;
+            double t0 = Prof.Now; int missing = 0, saved = 0;
+            foreach (var kv in Sync.Savables())
+            {
+                var b = kv.Key;
+                if (b == null || b.m_UniqueID == -1 || (Cache.TryGetValue(b.m_UniqueID, out var c) && c.B == b)) continue;
+                if (!b.GetComponent<Savable>().GetIsSavable()) continue;
+                missing++;
+                if (Prof.Now - t0 > budgetMs) continue;
+                Rescan(b, now); saved++;
+                if (Moves(b) && Cache.TryGetValue(b.m_UniqueID, out var cm)) cm.Fp = Fingerprint(b);   // (else the first scan re-saves every mover)
+            }
+            // done: look again now and then for things built meanwhile
+            if (!warmLogged && missing == saved) { warmLogged = true; Plugin.Log("scan cache ready for joiners (" + Cache.Count + " objects)"); }
+            nextWarm = now + (missing > saved ? 0f : 20f);   // (every frame until done: ~1 s on a big base)
+            return missing - saved;
         }
 
         static readonly List<int> drop = new List<int>();

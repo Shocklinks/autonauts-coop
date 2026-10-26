@@ -24,6 +24,9 @@ namespace AutonautsCoop
         public Func<bool> Busy;              // local editor holds references: wait before replacing
         public string Label;                 // for messages ("the script library")
         bool requested; JSONNode lastHost;
+        /// Host: combine a joiner's copy with ours by entry (scripts, folders) instead of replacing the section.
+        /// (cur, base the joiner edited from, joiner's copy, conflicts out) -> result. Sections with a merge don't lock.
+        public Func<JSONNode, JSONNode, JSONNode, List<string>, JSONNode> Merge;
 
         // joiner
         int baseHash, pushedHash; float pushedAt; bool wasEditing; JSONNode deferred;
@@ -50,6 +53,7 @@ namespace AutonautsCoop
 
         public void LockTick()
         {
+            if (Merge != null) return;   // merged by entry: no lock needed
             bool open = Editing();
             float now = Time.realtimeSinceStartup;
             bool mine = SectionLocks.Mine(Name), other = SectionLocks.HeldByOther(Name);
@@ -105,8 +109,12 @@ namespace AutonautsCoop
             var n = Safe(); int h = H(n);
             if (n == null || h == baseHash || h == pushedHash) return;
             var m = new JSONObject(); m["a"] = "shared"; m["n"] = Name; m["s"] = n;
+            if (Merge != null && lastHost != null) m["b"] = lastHost;   // what we started from: the host takes only what we changed
             Coop.I.Client.Host.Send(Msg.Input, m.ToString());
             pushedHash = h; pushedAt = Time.realtimeSinceStartup; Pushes++;
+            // the host has our changes now: the next push (before its copy comes back) is measured from this one,
+            // or a script we added and then renamed would look new again (and get a second UID)
+            if (Merge != null) lastHost = n;
             Plugin.Log("shared " + Name + " sent to host");
         }
 
@@ -149,11 +157,25 @@ namespace AutonautsCoop
         }
 
         /// Host: a joiner sent its copy.
-        public void HostIncoming(JSONNode n)
+        public void HostIncoming(JSONNode n, JSONNode basis = null, Peer from = null)
         {
+            if (Merge != null && basis != null && !basis.IsNull)
+            {
+                var conflicts = new List<string>();
+                JSONNode merged;
+                try { merged = Merge(queued ?? Safe(), basis, n, conflicts); }   // on top of one still waiting
+                catch (Exception e) { Plugin.Log("shared " + Name + " merge failed: " + e.Message); merged = n; }
+                n = merged;
+                if (conflicts.Count > 0 && from != null)
+                {
+                    Plugin.Log("shared " + Name + " from " + from.Name + ": kept the other change to " + string.Join(", ", conflicts.ToArray()));
+                    var r = new JSONObject(); r["note"] = "Someone else changed " + string.Join(", ", conflicts.ToArray()) + " first: your change to it wasn't kept";
+                    from.Send(Msg.Info, System.Text.Encoding.UTF8.GetBytes(r.ToString()));
+                }
+            }
             if (Busy()) { queued = n; Plugin.Log("shared " + Name + " from joiner queued (host editing)"); return; }
             Replace(n); Replaces++; Rebase();
-            Plugin.Log("shared " + Name + " replaced from joiner");
+            Plugin.Log("shared " + Name + (Merge != null && basis != null ? " merged from joiner" : " replaced from joiner"));
         }
 
         public void HostTick()
@@ -166,7 +188,7 @@ namespace AutonautsCoop
     {
         public static readonly SharedSection Scripts = new SharedSection
         {
-            Name = "Scripts", Label = "the script library",
+            Name = "Scripts", Label = "the script library", Merge = Library.Merge,
             Save = () => { var n = new JSONObject(); WorkerScriptManager.Instance.Save(n); return n; },
             Replace = Library.Replace,
             Editing = () => Library.Open() != null,
@@ -218,7 +240,7 @@ namespace AutonautsCoop
             {
                 var s = Get(n["n"]);
                 if (s == null || n["s"] == null || n["s"].IsNull) return true;
-                if (!SectionLocks.HostAllowed("peer" + from.Id, s.Name))
+                if (s.Merge == null && !SectionLocks.HostAllowed("peer" + from.Id, s.Name))
                 {
                     // someone else holds it: keep ours and give the sender our copy back
                     Plugin.Log("shared " + s.Name + " from " + from.Name + " refused: " + SectionLocks.Who(s.Name) + " is editing it");
@@ -227,7 +249,7 @@ namespace AutonautsCoop
                     from.Send(Msg.Info, System.Text.Encoding.UTF8.GetBytes(r.ToString()));
                     return true;
                 }
-                try { s.HostIncoming(n["s"]); } catch (Exception e) { Plugin.Log("shared " + (string)n["n"] + " apply: " + e); }
+                try { s.HostIncoming(n["s"], n["b"], from); } catch (Exception e) { Plugin.Log("shared " + (string)n["n"] + " apply: " + e); }
                 return true;
             }
             if (Groups.HostApply(a, n, fp)) return true;
@@ -238,6 +260,53 @@ namespace AutonautsCoop
     // ======================= script library =======================
     public static class Library
     {
+        /// Host: take from a joiner's copy only the scripts and folders it changed since the copy it started from
+        /// (base); everything else stays as we have it (others may have changed it meanwhile). The same entry changed
+        /// by both: ours (applied first) stays and the name goes in conflicts. A new entry whose UID someone else used
+        /// meanwhile gets a fresh UID.
+        public static JSONNode Merge(JSONNode cur, JSONNode basis, JSONNode mine, List<string> conflicts)
+        {
+            var result = JSON.Parse(cur.ToString());
+            int maxUid = Math.Max(cur["UIDCounter"].AsInt, mine["UIDCounter"].AsInt);
+            foreach (var arrName in new[] { "ScriptArray", "FolderArray" })
+            {
+                var c = Index(result[arrName]); var b = Index(basis[arrName]); var m = Index(mine[arrName]);
+                foreach (var kv in c) maxUid = Math.Max(maxUid, kv.Key + 1);
+                foreach (var kv in m) maxUid = Math.Max(maxUid, kv.Key + 1);
+                var outList = new List<JSONNode>(); var order = new List<int>();
+                foreach (JSONNode e in result[arrName].AsArray) order.Add(e["UID"].AsInt);
+                var keep = new Dictionary<int, JSONNode>(c);
+                var keys = new HashSet<int>(b.Keys); keys.UnionWith(m.Keys);
+                foreach (var uid in keys)
+                {
+                    b.TryGetValue(uid, out var bv); m.TryGetValue(uid, out var mv); c.TryGetValue(uid, out var cv);
+                    string bs = bv?.ToString(), ms = mv?.ToString(), cs = cv?.ToString();
+                    if (ms == bs) continue;                       // the joiner didn't touch it
+                    if (ms == cs) continue;                       // already so (an earlier push of the same change)
+                    if (bv == null)                               // new on the joiner
+                    {
+                        if (cv != null) { mv["UID"] = maxUid++; }  // UID taken meanwhile: a fresh one
+                        keep[mv["UID"].AsInt] = mv; order.Add(mv["UID"].AsInt);
+                        continue;
+                    }
+                    if (cs != bs) { conflicts.Add("'" + (string)(cv ?? bv)["Name"] + "'"); continue; }   // changed here too
+                    if (mv == null) keep.Remove(uid); else keep[uid] = mv;   // deleted / changed by the joiner
+                }
+                var arr = new JSONArray();
+                foreach (var uid in order) if (keep.TryGetValue(uid, out var e)) { arr.Add(e); keep.Remove(uid); }
+                result[arrName] = arr;
+            }
+            if (mine["LinkNames"].ToString() != basis["LinkNames"].ToString()) result["LinkNames"] = mine["LinkNames"];
+            result["UIDCounter"] = maxUid;
+            return result;
+        }
+        static Dictionary<int, JSONNode> Index(JSONNode arr)
+        {
+            var d = new Dictionary<int, JSONNode>();
+            if (arr != null && !arr.IsNull) foreach (JSONNode e in arr.AsArray) d[e["UID"].AsInt] = e;
+            return d;
+        }
+
         public static BotServerSelect Open()
         {
             if (!GameStateManager.Instance || GameStateManager.Instance.GetActualState() != GameStateManager.State.BuildingSelect) return null;

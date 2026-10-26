@@ -250,6 +250,7 @@ namespace AutonautsCoop
                     long m1 = Prof.Mem; Sync.ClientFrame(); Prof.Alloc("frame", m1);
                     long m2 = Prof.Mem; UiRebind.Tick(); Shared.ClientTick(); Look.ClientTick(); Prof.Alloc("ui", m2);
                 }
+                else if (Role == Role.Off && InGame()) Scan.Warm();   // ready for hosting: the first join doesn't save every object at once
                 Diag.EchoTick();
                 Diag.Tick();
                 Session.Tick();   // after the inbox: a "lobby ended" message may sit right before the close

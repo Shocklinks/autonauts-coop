@@ -188,7 +188,7 @@ namespace AutonautsCoop
             HostPlayerUID = Persist.HostUid >= 0 && ObjectTypeList.Instance.GetObjectFromUniqueID(Persist.HostUid, false) ? Persist.HostUid
                           : players.Count > 0 ? players[0].m_UniqueID : -1;
             Persist.HostUid = HostPlayerUID;
-            sentHash.Clear(); sentPos.Clear(); Scan.Reset();
+            sentHash.Clear(); sentPos.Clear(); Scan.Spread();   // (keep what Scan.Warm prepared before hosting; stale entries are re-saved as found)
             foreach (var pl in players) if (pl) Plugin.Log("  player uid " + pl.m_UniqueID + " type " + pl.GetType().Name + " active " + pl.gameObject.activeInHierarchy + " tile " + pl.GetComponent<TileCoordObject>().m_TileCoord.x + "," + pl.GetComponent<TileCoordObject>().m_TileCoord.y + " name " + pl.name);
             Plugin.Log("host player uid " + HostPlayerUID + " tile " + (players.Count > 0 ? players[0].GetComponent<TileCoordObject>().m_TileCoord.x + "," + players[0].GetComponent<TileCoordObject>().m_TileCoord.y : "-")
                 + " pos " + (players.Count > 0 ? players[0].transform.position.ToString() : "-") + " map " + TileManager.Instance.m_TilesWide + "x" + TileManager.Instance.m_TilesHigh
@@ -285,7 +285,7 @@ namespace AutonautsCoop
                 }
             bool anyPeer;
             lock (Coop.I.Host.Peers) anyPeer = Coop.I.Host.Peers.Exists(x => x.Alive && x.Name != "?");
-            if (!anyPeer) return;
+            if (!anyPeer) { Scan.Warm(); return; }   // ready for the first joiner
             float now = Time.realtimeSinceStartup;
             JSONObject msg = null;
 
@@ -886,14 +886,22 @@ namespace AutonautsCoop
             // a blueprint's building-to-be is created by its Load and only named by "NewID"
             if (o["NewID"] != null && !o["NewID"].IsNull && o["NewID"].AsInt > 0) nested.Add(o["NewID"].AsInt);
             if (nested.Count > 0 && b is Housing hs && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && HousingInPlace(hs, o, want, uid)) return;
-            // (not blueprints: the game's blueprint Load throws part-way when its building-to-be is replaced, and the
-            //  half-loaded blueprint then broke the rebuild too; they keep the rebuild)
-            if (nested.Count > 0 && b is Building bi && !(b is Housing) && !(b is ConverterFoundation) && !bi.m_ParentBuilding
+            if (nested.Count > 0 && b is Building bi && !(b is Housing) && !bi.m_ParentBuilding
                 && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false) && BuildingInPlace(bi, o, want, uid, nested)) return;
             if (nested.Count > 0)
             {
                 // Children (carried items, nests, contents) are rebuilt by the parent's Load; clear them first.
-                foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); touchedNested.Add(c); }
+                foreach (var c in nested)
+                {
+                    var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false);
+                    touchedNested.Add(c);
+                    if (!cb || cb == b) continue;
+                    // (the host says b has it: take it from wherever our copy shows it; a farmer left holding a dead
+                    //  item is cleaned at its next reload, and the late check / digest asks for that reload)
+                    var hold = cb.transform.parent ? cb.transform.parent.GetComponentInParent<Farmer>() : null;
+                    Destroy(cb);
+                    if (hold && hold != b) { ClearHeld(hold, cb); mustVerify.Add(hold.m_UniqueID); Scan.Force(hold.m_UniqueID); }
+                }
                 // Players and bots pick things up and put them down all the time. Rebuilding them each time made them
                 // hard to click and dropped the selection/editor on the joiner; reload the same object instead.
                 if (b && b is Farmer && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false))
@@ -911,13 +919,14 @@ namespace AutonautsCoop
                         b.GetComponent<Savable>().Load(o);
                         KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
+                        ClearHeld(b.GetComponent<Farmer>());   // and after: a slot could still point at an item that was just destroyed (a worn hat saved with no ID)
                         ApplyStored(b, o);
                         string kindN = "nested " + (string)o["ID"];
                         if (b.m_UniqueID == uid && TrustInPlace(kindN, uid)) { StatInPlace++; StatNestedInPlace++; StatVerifySkipped++; Applied(b, uid, StableW(b, want)); Unchecked(uid); return; }
                         string got = Stable(b, SaveObject(b, out _));
                         bool okN = b.m_UniqueID == uid && got == StableW(b, want); Verified(kindN, uid, okN);
                         if (okN) { StatInPlace++; Applied(b, uid, StableW(b, want)); StatNestedInPlace++; return; }
-                        LogDiff("nested " + (string)o["ID"], want, got);
+                        LogDiff("nested " + (string)o["ID"], StableW(b, want), got);
                     }
                     catch (Exception e) { Plugin.Log("in-place nested load failed for " + o["ID"] + ": " + e.Message); }
                     foreach (var c in nested) { var cb = ObjectTypeList.Instance.GetObjectFromUniqueID(c, false); if (cb && cb != b) Destroy(cb); }
@@ -933,6 +942,26 @@ namespace AutonautsCoop
                 // (e.g. a bees nest that fell out of its tree). Detach by rebuilding it on its own.
                 var holder = b.transform.parent.GetComponentInParent<BaseClass>();
                 Plugin.Log("detaching " + o["ID"] + " " + uid + " from " + holder.m_TypeIdentifier + " " + holder.m_UniqueID);
+                // put down by a bot or player: the game's own drop, then the host's data (no rebuild)
+                if (holder is Farmer hf && b is Holdable hb && b.m_TypeIdentifier == ObjectTypeList.Instance.GetIdentifierFromSaveName(o["ID"], false))
+                {
+                    try
+                    {
+                        ClearHeld(hf, b);
+                        hb.SendAction(new ActionInfo(ActionType.Dropped, new TileCoord(o["TX"].AsInt, o["TY"].AsInt), hf));
+                        if (!(b.transform.parent && b.transform.parent.GetComponentInParent<BaseClass>()))
+                        {
+                            if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == b) ObjectTypeList.Instance.RemoveActionable(b);
+                            b.GetComponent<Savable>().Load(o);
+                            b.GetComponent<Savable>().PostLoad();
+                            string gotD = Stable(b, SaveObject(b, out _));
+                            mustVerify.Add(hf.m_UniqueID); Scan.Force(hf.m_UniqueID);
+                            if (b.m_UniqueID == uid && gotD == StableW(b, want)) { StatInPlace++; StatDetachInPlace++; Applied(b, uid, StableW(b, want)); return; }
+                            LogDiff("detach " + (string)o["ID"], StableW(b, want), gotD);
+                        }
+                    }
+                    catch (Exception e) { Plugin.Log("in-place detach failed for " + o["ID"] + ": " + e.Message); }
+                }
                 var tree = holder.GetComponent<MyTree>();
                 if (tree && tree.m_BeesNest == b) tree.m_BeesNest = null;
                 Destroy(b); StatRecreated++; Count("detach:" + (string)o["ID"], uid);
@@ -970,6 +999,7 @@ namespace AutonautsCoop
                         b.GetComponent<Savable>().Load(o);
                         KeepEngaged(b, o, engKeep);
                         b.GetComponent<Savable>().PostLoad();
+                        ClearHeld(b.GetComponent<Farmer>());   // and after: a slot could still point at an item that was just destroyed (a worn hat saved with no ID)
                         // plants (and storage) apply part of what they load only on Refresh, as after the game's own load
                         if (!(b is Farmer)) b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
                         ApplyStored(b, o);
@@ -978,7 +1008,7 @@ namespace AutonautsCoop
                         string got = Stable(b, SaveObject(b, out _));
                         bool okM = b.m_UniqueID == uid && got == StableW(b, want); Verified(kindM, uid, okM);
                         if (okM) { StatInPlace++; Applied(b, uid, StableW(b, want)); return; }
-                        LogDiff((string)o["ID"], want, got);
+                        LogDiff((string)o["ID"], StableW(b, want), got);
                     }
                     catch (Exception e) { Plugin.Log("in-place load failed for " + o["ID"] + ": " + e.Message); }
                 }
@@ -995,7 +1025,8 @@ namespace AutonautsCoop
         /// Settlement huts save their folk inside them, and folk change all the time (energy, timers), so every hut
         /// changed every scan and was rebuilt with its folk. Update the hut and each of its folk in place instead,
         /// as long as the same folk live there.
-        public static int StatBuildingInPlace, StatSameCached;
+        public static int StatBuildingInPlace, StatSameCached, StatDetachInPlace;
+        public static ConverterFoundation InPlaceFoundation;   // its Load must keep the building-to-be it has
         /// Buildings with contents (storage stacks, machines holding ingredients) were destroyed and rebuilt on every
         /// change: a stack's count went up by one, a bench got an ingredient. ~380 rebuilds in 3 minutes on a big base,
         /// each a pile of new objects (and the old ones' garbage). Reload the same building instead: its levels in
@@ -1028,6 +1059,13 @@ namespace AutonautsCoop
                     var lnest = new List<int>(); CollectUIDs(lvArr[i].ToString(), l.m_UniqueID, lnest);
                     if (lnest.Count > 0) return false;
                 }
+                if (cf)
+                {
+                    // a blueprint keeps its building-to-be (replacing it made the game's Load throw part-way); a
+                    // different one means a rebuild. Load from idle: leaving "building" runs the stage-finished code.
+                    var nbd = cf.m_NewBuilding;
+                    if (!nbd || nbd.m_UniqueID != newId || ObjectTypeList.Instance.GetIdentifierFromSaveName(o["New"], false) != nbd.m_TypeIdentifier) return false;
+                }
                 var cv = bld as Converter;
                 if (ingArr != null && ingArr.Count > 0 && !cv) return false;
                 if (cv && cv.m_Ingredients != null)
@@ -1038,14 +1076,12 @@ namespace AutonautsCoop
                 if (ingArr != null) foreach (JSONNode e in ingArr) { int u = e["UID"].AsInt; if (u > 0) FreeUid(u); }
                 if (cf)
                 {
-                    // a blueprint: its building-to-be is made again by its Load. Drop ours first (and load from idle:
-                    // leaving "building" runs the stage-finished code, which needs the building-to-be)
-                    if (cf.m_NewBuilding) { var nbd = cf.m_NewBuilding; cf.m_NewBuilding = null; nbd.StopUsing(); destroyedLastBatch = true; }   // (as the blueprint itself does: it never sat on the map)
-                    if (newId > 0) FreeUid(newId);
-                    cf.m_State = Converter.State.Idle;
+                    cf.m_State = Converter.State.Idle; InPlaceFoundation = cf;   // load from idle: leaving "building" runs the stage-finished code
+                    // its Load registers the building-to-be under NewID again: take it out first (else "same key" part-way)
+                    if (ObjectTypeList.Instance.GetObjectFromUniqueID(newId, false) == cf.m_NewBuilding) ObjectTypeList.Instance.RemoveActionable(cf.m_NewBuilding);
                 }
                 if (ObjectTypeList.Instance.GetObjectFromUniqueID(uid, false) == bld) ObjectTypeList.Instance.RemoveActionable(bld);
-                bld.GetComponent<Savable>().Load(o);
+                try { bld.GetComponent<Savable>().Load(o); } finally { InPlaceFoundation = null; }
                 bld.GetComponent<Savable>().PostLoad();
                 for (int i = 0; i < nl; i++)
                 {
@@ -1060,10 +1096,36 @@ namespace AutonautsCoop
                 string got = Stable(bld, SaveObject(bld, out _));
                 bool okB = bld.m_UniqueID == uid && got == StableW(bld, want); Verified(kindB, uid, okB);
                 if (okB) { StatInPlace++; Applied(bld, uid, StableW(bld, want)); StatBuildingInPlace++; return true; }
-                LogDiff("building " + (string)o["ID"], want, got);
+                LogDiff("building " + (string)o["ID"], StableW(bld, want), got);
             }
-            catch (Exception e) { Plugin.Log("in-place building load failed for " + o["ID"] + ": " + e.Message); }
+            catch (Exception e)
+            {
+                Plugin.Log("in-place building load failed for " + o["ID"] + ": " + e.Message);
+                // a blueprint whose building-to-be is no longer registered can't be removed cleanly by the rebuild
+                if (bld is ConverterFoundation cf2 && cf2.m_NewBuilding && !ObjectTypeList.Instance.GetObjectFromUniqueID(cf2.m_NewBuilding.m_UniqueID, false))
+                    try { ObjectTypeList.Instance.ChangeActionable(cf2.m_NewBuilding, cf2.m_NewBuilding.m_UniqueID); } catch { }
+            }
             return false;
+        }
+
+        /// Folk load their state into a waiting field that only a Refresh applies, and a Refresh would also add them to
+        /// their hut again; huts' folk came back "idle" on the joiner (the hut then never matched and kept being
+        /// rebuilt). Apply the state directly.
+        static readonly System.Reflection.MethodInfo folkSetState = HarmonyLib.AccessTools.Method(typeof(Folk), "SetState");
+        static void ApplyFolkStates(Housing h, JSONNode o)
+        {
+            try
+            {
+                var arr = o["Folks"]; if (arr == null || arr.IsNull) return;
+                foreach (JSONNode fj in arr.AsArray)
+                {
+                    var f = ObjectTypeList.Instance.GetObjectFromUniqueID(fj["UID"].AsInt, false) as Folk;
+                    if (!f) continue;
+                    var st = (Folk.State)fj["ST"].AsInt;
+                    if (f.m_State != st && folkSetState != null) folkSetState.Invoke(f, new object[] { st });
+                }
+            }
+            catch (Exception e) { Plugin.Log("folk states: " + e.Message); }
         }
 
         static bool HousingInPlace(Housing h, JSONNode o, string want, int uid)
@@ -1109,9 +1171,10 @@ namespace AutonautsCoop
                     h.m_Folks.Clear(); h.m_Folks.AddRange(order);
                     for (int i = 0; i < order.Count; i++) order[i].Show(i == order.Count - 1);
                 }
+                ApplyFolkStates(h, o);
                 string got = Stable(h, SaveObject(h, out _));
                 if (h.m_UniqueID == uid && got == StableW(h, want)) { StatInPlace++; Applied(h, uid, StableW(h, want)); StatHousingInPlace++; return true; }
-                LogDiff("housing " + (string)o["ID"], want, got);
+                LogDiff("housing " + (string)o["ID"], StableW(h, want), got);
             }
             catch (Exception e) { Plugin.Log("in-place housing load failed for " + o["ID"] + ": " + e.Message); }
             return false;
@@ -1127,10 +1190,13 @@ namespace AutonautsCoop
             var hold = x.transform.parent ? x.transform.parent.GetComponentInParent<Farmer>() : null;   // (upgrades like a backpack hold items too: only another farmer counts)
             return hold && hold != f;
         }
-        static void ClearHeld(Farmer f)
+        static void ClearHeld(Farmer f, BaseClass gone = null)
         {
             if (!f) return;
-            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => NotHeldBy(x, f)); } catch { }
+            // gone, or no longer registered (destroyed: removed at the end of the frame; and the game pools objects, so
+            // "destroyed this update" can't be used, a Load may have taken the same object back with a new UID)
+            bool Drop(Holdable x) => NotHeldBy(x, f) || (gone && x == gone) || (x && ObjectTypeList.Instance.GetObjectFromUniqueID(x.m_UniqueID, false) != x);
+            try { f.m_FarmerCarry.m_CarryObject.RemoveAll(x => Drop(x)); } catch { }
             foreach (var comp in new Component[] { f.m_FarmerInventory, f.GetComponent<FarmerUpgrades>(), f.GetComponent<FarmerClothes>() })
             {
                 if (!comp) continue;
@@ -1139,12 +1205,12 @@ namespace AutonautsCoop
                     if (fld.FieldType == typeof(List<Holdable>))
                     {
                         var l = fld.GetValue(comp) as List<Holdable>;
-                        l?.RemoveAll(x => NotHeldBy(x, f));
+                        l?.RemoveAll(x => Drop(x));
                     }
                     else if (fld.FieldType == typeof(Holdable[]))
                     {
                         var a = fld.GetValue(comp) as Holdable[];
-                        if (a != null) for (int i = 0; i < a.Length; i++) if (a[i] != null && NotHeldBy(a[i], f)) a[i] = null;
+                        if (a != null) for (int i = 0; i < a.Length; i++) if (a[i] != null && Drop(a[i])) a[i] = null;
                     }
                 }
             }
@@ -1316,6 +1382,7 @@ namespace AutonautsCoop
             b.GetComponent<Savable>().PostLoad();
             b.GetComponent<Actionable>().SendAction(new ActionInfo(ActionType.Refresh, default(TileCoord)));
             ApplyStored(b, o);
+            if (b is Housing hc) ApplyFolkStates(hc, o);
             if (b.m_UniqueID != uid)
             {
                 // the UID was still taken: move the new object onto the host's UID so later updates find it
@@ -1704,5 +1771,20 @@ namespace AutonautsCoop
         // (a folk the joiner already removed could still be listed: drop those so the rest of the clean-up runs)
         static void Prefix(Housing __instance) { if (Coop.Role == Role.Client && __instance.m_Folks != null) __instance.m_Folks.RemoveAll(f => !f); }
         static Exception Finalizer(Exception __exception) => __exception is NullReferenceException && Coop.Role == Role.Client ? null : __exception;
+    }
+}
+
+
+namespace AutonautsCoop
+{
+    // Joiner, in-place update of a blueprint: its Load makes the building-to-be again; keep the one it has.
+    [HarmonyLib.HarmonyPatch(typeof(ConverterFoundation), nameof(ConverterFoundation.SetNewBuilding))]
+    static class P_ClientKeepNewBuilding
+    {
+        static bool Prefix(ConverterFoundation __instance, ObjectType NewBuildingType, int UID)
+        {
+            var cf = Sync.InPlaceFoundation;
+            return !(cf == __instance && cf.m_NewBuilding && cf.m_NewBuilding.m_UniqueID == UID && cf.m_NewBuilding.m_TypeIdentifier == NewBuildingType);
+        }
     }
 }

@@ -157,14 +157,20 @@ Sandbox limits:
   workers' "Instruction"; current lines go in "ip" next to "mv".
 - Joiner apply: SplitUp() takes "up" elements as raw text; UpsertRaw skips matches before parsing.
 - Section locks are change-based (SharedSection.LockTick: hash per tick while open; hold 5 s after the last change).
+  Scripts has no lock (0.12.36): SharedSection.Merge = Library.Merge. The joiner's push carries "b" (the host copy it
+  edited from); the host 3-way merges per script/folder UID (only entries the pusher changed; both changed -> host's
+  kept and the pusher gets a "wasn't kept" note; a new entry with a taken UID gets a fresh one).
+- Host first join: Scan.Warm fills the scan cache a few ms per frame while nobody is connected (the first join's
+  flush was a full save of every object, ~175 ms on BRAVO). WorldState sections in Backoff slow to 4 s while unchanged.
+- Scan hot objects (changed in the last 3 s): re-saved only when StaticFp changes or once a second.
 - Join snapshot (Coop.SendSnapshot): flush without Scan.Full, capture on the main thread, gzip on a thread;
   Peer.Hold + Peer.Deferred keep the broadcasts made meanwhile and send them right after the snapshot.
 - Joiner: P_ClientNoModWorldWrites blocks world-changing Mod* calls; LateCheck re-saves unverified in-place updates
   1.5 s later.
 0. Garbage (GC pauses, ~200 ms each on a big save): host mod garbage ~8 MB/s (mostly re-saving objects to check
    them), joiner apply ~14 MB/s (parsing host JSON and re-serializing each object). Next ideas: per-type cheap
-   fingerprints for the background round; apply host JSON without the parse/ToString round trip. The joiner still
-   rebuilds blueprints with their building-to-be (nested ConverterFoundation) and huts that changed folk.
+   fingerprints for the background round; apply host JSON without the parse/ToString round trip. Blueprints and huts
+   update in place since 0.12.35/36 (blueprints keep their building-to-be; P_ClientKeepNewBuilding).
    Workshop (Lua) mods run on the joiner too: ModStorage writes are blocked there (0.12.24); other mod APIs that
    change the world (spawn objects, move bots) may still act locally (the digest removes extras).
 

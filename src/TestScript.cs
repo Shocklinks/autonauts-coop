@@ -335,6 +335,9 @@ namespace AutonautsCoop
                 case "test_slock":
                     SectionLocks.HostSet("test", "Host", "Scripts", n["on"].AsBool);   // its own owner: the host's editor isn't open, its tick would let go
                     return true;
+                case "test_renamescript":
+                    foreach (var sc in WorkerScriptManager.Instance.m_Scripts) if (sc.m_Name == "HostScript") sc.m_Name = "HostScriptRenamed";
+                    return true;
                 case "test_hostscript":
                 {
                     var hl = new HighInstructionList();
@@ -460,7 +463,7 @@ namespace AutonautsCoop
             if (UnityEngine.Time.realtimeSinceStartup > nextAsk) { nextAsk = UnityEngine.Time.realtimeSinceStartup + 1.5f; Ask(q, w); }
             return null;
         }
-        static float slockAsk; static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
+        static float slockAsk; static string sBase; static int builtUid = -1, newScriptUid = -1, foldersBefore = -1; static TileCoord catTarget; static int missionPick = -1, missionDrop = -1;
         // ---- bot selection test (8b) ----
         public static readonly List<int> wanderUids = new List<int>();
         static int selTrial, selHits, selFrame; static Worker selTarget, selClicked; static float selT;
@@ -1412,56 +1415,44 @@ namespace AutonautsCoop
                 TestBot.Assert("host: joiner deleted the script and the bot was unlinked", r == true, Reply?.ToString());
                 return true;
             });
-            // 17b. one editor at a time: while the host has the library, the joiner's editor closes and its edits aren't kept
-            s.Add(el => { if (SectionLocks.Mine("Scripts") && el < 10f) return false; HostReq("test_slock", n => n["on"] = true); Menu.Toasts.Clear(); slockAsk = 0; return true; });   // our own hold from the last step must be gone first
+            // 17b. the library merges by script: a push made from an old copy keeps the host's newer changes,
+            // adds what the joiner added, and a script both changed keeps the host's version (the joiner is told)
+            s.Add(el => { sBase = Shared.Get("Scripts").Save().ToString(); Menu.Toasts.Clear(); HostReq("test_renamescript"); return true; });
             s.Add(el =>
             {
-                bool held = SectionLocks.HeldByOther("Scripts");
-                if (!held && el - slockAsk > 2f) { slockAsk = el; HostReq("test_slock", n => n["on"] = true); }   // (refused while ours was on its way out)
-                if (!held && el < 10f) return false;
-                TestBot.Assert("client: sees that the host is editing the script library", held);
-                var bot = Obj(botUid)?.GetComponent<Worker>();
-                if (BotServer.m_FirstBotServer != null && bot)
-                {
-                    GameStateManager.Instance.SetState(GameStateManager.State.Normal);
-                    GameStateManager.Instance.StartSelectBuilding(BotServer.m_FirstBotServer, ObjectType.BotServer);
-                }
-                return true;
-            });
-            s.Add(el =>
-            {
-                var sel = Library.Open();
-                if ((!sel || el < 1.5f) && el < 10f) return false;
-                TestBot.Assert("client: library opens for a look while the host edits it", sel != null);
-                // a change anyway: it must be undone here, with a message
+                bool ok = false; foreach (var sc in WorkerScriptManager.Instance.m_Scripts) if (sc.m_Name == "HostScriptRenamed") ok = true;
+                if (!ok && el < 10f) return false;
+                TestBot.Assert("client: host's rename reached the joiner", ok);
                 WorkerScriptManager.Instance.AddScript("LockTestScript", new HighInstructionList(), ObjectType.WorkerHeadMk0, -1, -1, Color.white);
-                // and a push sent anyway (as if made during the hand-over): the host must refuse it
-                var m = new JSONObject(); m["a"] = "shared"; m["n"] = "Scripts"; m["s"] = Shared.Get("Scripts").Save();
+                JSONNode add = null; foreach (JSONNode e in Shared.Get("Scripts").Save()["ScriptArray"].AsArray) if ((string)e["Name"] == "LockTestScript") add = e;
+                var mine = JSON.Parse(sBase); mine["ScriptArray"].Add(JSON.Parse(add.ToString())); mine["UIDCounter"] = Math.Max(mine["UIDCounter"].AsInt, add["UID"].AsInt + 1);
+                var m = new JSONObject(); m["a"] = "shared"; m["n"] = "Scripts"; m["s"] = mine; m["b"] = JSON.Parse(sBase);   // from the copy before the rename
                 Coop.I.Client.Host.Send(Msg.Input, m.ToString());
                 return true;
             });
             s.Add(el =>
             {
-                bool gone = true; foreach (var sc in WorkerScriptManager.Instance.m_Scripts) if (sc.m_Name == "LockTestScript") gone = false;
-                bool told = Menu.Toasts.Exists(t => t.Contains("your change was undone"));
-                if (!(gone && told) && el < 10f) return false;
-                TestBot.Assert("client: a change while the host edits is undone with a message", gone && told, "gone " + gone + ", told " + told);
-                if (Library.Open() != null) GameStateManager.Instance.PopState();
-                return true;
-            });
-            s.Add(el =>
-            {
-                var r = Poll(el, "lib", botUid, x => !HasName(x["names"], "LockTestScript#"));
+                var r = Poll(el, "lib", botUid, x => HasName(x["names"], "LockTestScript#") && HasName(x["names"], "HostScriptRenamed#"));
                 if (r == null) return false;
-                TestBot.Assert("host: library unchanged by the joiner's push without the lock", r == true, Reply?.ToString());
-                HostReq("test_slock", n => n["on"] = false);
+                TestBot.Assert("host: joiner's add from an old copy kept, host's rename kept", r == true, Reply?.ToString());
+                var mine = JSON.Parse(sBase);
+                foreach (JSONNode e in mine["ScriptArray"].AsArray) if ((string)e["Name"] == "HostScript") e["Name"] = "JoinerName";
+                var m = new JSONObject(); m["a"] = "shared"; m["n"] = "Scripts"; m["s"] = mine; m["b"] = JSON.Parse(sBase);
+                Coop.I.Client.Host.Send(Msg.Input, m.ToString());
                 return true;
             });
             s.Add(el =>
             {
-                bool free = !SectionLocks.HeldByOther("Scripts");
-                if (!free && el < 10f) return false;
-                TestBot.Assert("client: library free again when the host is done", free);
+                bool told = Menu.Toasts.Exists(t => t.Contains("wasn't kept"));
+                if (!told && el < 10f) return false;
+                TestBot.Assert("client: told when the host's change to the same script won", told);
+                return true;
+            });
+            s.Add(el =>
+            {
+                var r = Poll(el, "lib", botUid, x => HasName(x["names"], "HostScriptRenamed#") && !HasName(x["names"], "JoinerName#"));
+                if (r == null) return false;
+                TestBot.Assert("host: same script changed by both keeps the host's version", r == true, Reply?.ToString());
                 return true;
             });
             // 18. catapult: engage, aim, confirm -> the host's catapult gets the target
